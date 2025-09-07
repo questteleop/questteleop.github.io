@@ -25,62 +25,66 @@ const JOINTS = [
   "middle-finger-metacarpal","middle-finger-phalanx-proximal","middle-finger-phalanx-intermediate","middle-finger-phalanx-distal","middle-finger-tip",
   "ring-finger-metacarpal","ring-finger-phalanx-proximal","ring-finger-phalanx-intermediate","ring-finger-phalanx-distal","ring-finger-tip",
   "pinky-finger-metacarpal","pinky-finger-phalanx-proximal","pinky-finger-phalanx-intermediate","pinky-finger-phalanx-distal","pinky-finger-tip",
-]; // 规范 25 关节名。:contentReference[oaicite:4]{index=4}
+];
 
+const WS_URL = "wss://你的-ngrok-域名.ngrok-free.app"; // ← 改成你的
 let socket = null;
-function log(...args){ console.log(...args); document.getElementById('log').textContent = args.join(" ") }
-
-function connectWS(url){
-  socket = new WebSocket(url);
-  socket.onopen  = () => log("WS connected:", url);
-  socket.onclose = () => log("WS closed");
-  socket.onerror = (e) => log("WS error:", e.message || e);
-}
+function log(txt){ console.log(txt); const el = document.getElementById('log'); if(el) el.textContent = txt; }
 
 async function startXR(){
-  if (!('xr' in navigator)) { log("WebXR 不可用（请确认 HTTPS / 浏览器支持）"); return; } // :contentReference[oaicite:5]{index=5}
-  const wss = document.getElementById('ws').value.trim();
-  connectWS(wss);
+  if (!('xr' in navigator)) { log("WebXR 不可用（需 HTTPS/最新 Quest 浏览器）"); return; }
 
+  // 连接 WebSocket（可选，不连也不会影响呈现）
+  try { socket = new WebSocket(WS_URL); socket.onopen=()=>log("WS connected"); } catch(e){ log("WS 连接失败(可先忽略)："+e); }
+
+  // 检查 immersive-vr 支持
   const ok = await navigator.xr.isSessionSupported('immersive-vr');
   if (!ok) { log("immersive-vr 不受支持"); return; }
 
-  const session = await navigator.xr.requestSession('immersive-vr', {
-    requiredFeatures: ['local-floor'],
-    optionalFeatures: ['hand-tracking'] // 开启手部关节。:contentReference[oaicite:6]{index=6}
-  });
+  // 创建 Session（关键：后面会设置 XRWebGLLayer）
+  let session;
+  try{
+    session = await navigator.xr.requestSession('immersive-vr', {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: ['hand-tracking'] // 要手部数据
+    });
+  }catch(e){
+    log("requestSession 失败：" + e); return;
+  }
 
-  const refSpace = await session.requestReferenceSpace('local-floor'); // Y 向上、-Z 朝前的右手坐标系。:contentReference[oaicite:7]{index=7}
+  // ====== 关键补丁：创建 WebGL 并设置 XRWebGLLayer，防止“三个点” ======
+  const canvas = document.createElement('canvas');          // 不必插到 DOM
+  const gl = canvas.getContext('webgl', { xrCompatible: true, alpha:false, antialias:true });
+  await gl.makeXRCompatible();
+  session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+  // =====================================================================
+
+  const refSpace = await session.requestReferenceSpace('local-floor');
+  log('XR session started');
+
   session.addEventListener('end', ()=>log('XR session ended'));
 
   const onFrame = (time, frame) => {
-    const sess = frame.session;
-    for (const source of sess.inputSources) {
-      if (!source.hand) continue; // XRInputSource.hand 暴露 XRHand（关节集合）。:contentReference[oaicite:8]{index=8}
+    const baseLayer = session.renderState.baseLayer;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
+    gl.clearColor(0.02, 0.02, 0.04, 1.0);                  // 随便清个背景
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);   // 只要清屏就算“呈现了”
+
+    // 采手部数据并发回电脑
+    for (const source of session.inputSources) {
+      if (!source.hand) continue;
       const out = { t: time, space: 'local-floor', hand: source.handedness, joints: {} };
-
-      // 简单逐关节读取（getJointPose）：
       for (const j of JOINTS){
-        const js = source.hand.get(j);                 // XRJointSpace。:contentReference[oaicite:9]{index=9}
+        const js = source.hand.get(j);
         if (!js) continue;
-        const pose = frame.getJointPose(js, refSpace); // XRJointPose。:contentReference[oaicite:10]{index=10}
+        const pose = frame.getJointPose(js, refSpace);
         if (!pose) continue;
-        const p = pose.transform.position;
-        const q = pose.transform.orientation;
-        out.joints[j] = { x:p.x, y:p.y, z:p.z, qx:q.x, qy:q.y, qz:q.z, qw:q.w, radius: pose.radius ?? null }; // 可取到半径。:contentReference[oaicite:11]{index=11}
+        const p = pose.transform.position, q = pose.transform.orientation;
+        out.joints[j] = { x:p.x, y:p.y, z:p.z, qx:q.x, qy:q.y, qz:q.z, qw:q.w, radius: pose.radius ?? null };
       }
-
-      // 高性能批量法（可选）：fillPoses + fillJointRadii（把上面循环替换为矩阵/半径批量获取）
-      // const spaces = Array.from(source.hand.values());
-      // const mats = new Float32Array(spaces.length * 16);
-      // const radii = new Float32Array(spaces.length);
-      // frame.fillPoses(spaces, refSpace, mats);      // 取关节4x4矩阵（列主序）。:contentReference[oaicite:12]{index=12}
-      // frame.fillJointRadii(spaces, radii);          // 取关节半径。:contentReference[oaicite:13]{index=13}
-
-      if (socket && socket.readyState === 1) {
-        socket.send(JSON.stringify(out));
-      }
+      if (socket && socket.readyState === 1) socket.send(JSON.stringify(out));
     }
+
     session.requestAnimationFrame(onFrame);
   };
   session.requestAnimationFrame(onFrame);
