@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WebXR Hand → Python Stream</title>
+<style>
+  body { font-family: system-ui, sans-serif; padding: 24px; }
+  button { font-size: 16px; padding: 10px 16px; }
+  #log { white-space: pre-wrap; margin-top: 12px; font-family: ui-monospace, monospace; }
+</style>
+<body>
+  <h1>WebXR 手部关节采集 → WebSocket</h1>
+  <p>在 Quest 浏览器里打开本页，点击下方按钮进入 VR，并允许“手部追踪”。</p>
+  <label>WSS 地址：
+    <input id="ws" style="width: min(600px, 80vw)" value="wss://xxxxx.ngrok.io">
+  </label>
+  <div><button id="enter">进入 WebXR（手势）</button></div>
+  <div id="log"></div>
+
+<script>
+const JOINTS = [
+  "wrist",
+  "thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx-distal","thumb-tip",
+  "index-finger-metacarpal","index-finger-phalanx-proximal","index-finger-phalanx-intermediate","index-finger-phalanx-distal","index-finger-tip",
+  "middle-finger-metacarpal","middle-finger-phalanx-proximal","middle-finger-phalanx-intermediate","middle-finger-phalanx-distal","middle-finger-tip",
+  "ring-finger-metacarpal","ring-finger-phalanx-proximal","ring-finger-phalanx-intermediate","ring-finger-phalanx-distal","ring-finger-tip",
+  "pinky-finger-metacarpal","pinky-finger-phalanx-proximal","pinky-finger-phalanx-intermediate","pinky-finger-phalanx-distal","pinky-finger-tip",
+]; // 规范 25 关节名。:contentReference[oaicite:4]{index=4}
+
+let socket = null;
+function log(...args){ console.log(...args); document.getElementById('log').textContent = args.join(" ") }
+
+function connectWS(url){
+  socket = new WebSocket(url);
+  socket.onopen  = () => log("WS connected:", url);
+  socket.onclose = () => log("WS closed");
+  socket.onerror = (e) => log("WS error:", e.message || e);
+}
+
+async function startXR(){
+  if (!('xr' in navigator)) { log("WebXR 不可用（请确认 HTTPS / 浏览器支持）"); return; } // :contentReference[oaicite:5]{index=5}
+  const wss = document.getElementById('ws').value.trim();
+  connectWS(wss);
+
+  const ok = await navigator.xr.isSessionSupported('immersive-vr');
+  if (!ok) { log("immersive-vr 不受支持"); return; }
+
+  const session = await navigator.xr.requestSession('immersive-vr', {
+    requiredFeatures: ['local-floor'],
+    optionalFeatures: ['hand-tracking'] // 开启手部关节。:contentReference[oaicite:6]{index=6}
+  });
+
+  const refSpace = await session.requestReferenceSpace('local-floor'); // Y 向上、-Z 朝前的右手坐标系。:contentReference[oaicite:7]{index=7}
+  session.addEventListener('end', ()=>log('XR session ended'));
+
+  const onFrame = (time, frame) => {
+    const sess = frame.session;
+    for (const source of sess.inputSources) {
+      if (!source.hand) continue; // XRInputSource.hand 暴露 XRHand（关节集合）。:contentReference[oaicite:8]{index=8}
+      const out = { t: time, space: 'local-floor', hand: source.handedness, joints: {} };
+
+      // 简单逐关节读取（getJointPose）：
+      for (const j of JOINTS){
+        const js = source.hand.get(j);                 // XRJointSpace。:contentReference[oaicite:9]{index=9}
+        if (!js) continue;
+        const pose = frame.getJointPose(js, refSpace); // XRJointPose。:contentReference[oaicite:10]{index=10}
+        if (!pose) continue;
+        const p = pose.transform.position;
+        const q = pose.transform.orientation;
+        out.joints[j] = { x:p.x, y:p.y, z:p.z, qx:q.x, qy:q.y, qz:q.z, qw:q.w, radius: pose.radius ?? null }; // 可取到半径。:contentReference[oaicite:11]{index=11}
+      }
+
+      // 高性能批量法（可选）：fillPoses + fillJointRadii（把上面循环替换为矩阵/半径批量获取）
+      // const spaces = Array.from(source.hand.values());
+      // const mats = new Float32Array(spaces.length * 16);
+      // const radii = new Float32Array(spaces.length);
+      // frame.fillPoses(spaces, refSpace, mats);      // 取关节4x4矩阵（列主序）。:contentReference[oaicite:12]{index=12}
+      // frame.fillJointRadii(spaces, radii);          // 取关节半径。:contentReference[oaicite:13]{index=13}
+
+      if (socket && socket.readyState === 1) {
+        socket.send(JSON.stringify(out));
+      }
+    }
+    session.requestAnimationFrame(onFrame);
+  };
+  session.requestAnimationFrame(onFrame);
+}
+
+document.getElementById('enter').addEventListener('click', startXR);
+</script>
+</body>
+</html>
