@@ -12,7 +12,7 @@
   <h1>WebXR 手部关节采集 → WebSocket</h1>
   <p>在 Quest 浏览器里打开本页，点击下方按钮进入 VR，并允许“手部追踪”。</p>
   <label>WSS 地址：
-    <input id="ws" style="width: min(600px, 80vw)" value="wss://a516a0df234f.ngrok-free.app">
+    <input id="ws" style="width: min(600px, 80vw)" value="wss://undisposed-westin-unpromotable.ngrok-free.app">
   </label>
   <div><button id="enter">进入 WebXR（手势）</button></div>
   <div id="log"></div>
@@ -27,7 +27,7 @@ const JOINTS = [
   "pinky-finger-metacarpal","pinky-finger-phalanx-proximal","pinky-finger-phalanx-intermediate","pinky-finger-phalanx-distal","pinky-finger-tip",
 ];
 
-const WS_URL = "wss://a516a0df234f.ngrok-free.app"; // ← 改成你的
+const WS_URL = "wss://undisposed-westin-unpromotable.ngrok-free.app"; // ← 改成你的
 let socket = null;
 function log(txt){ console.log(txt); const el = document.getElementById('log'); if(el) el.textContent = txt; }
 
