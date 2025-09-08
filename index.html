@@ -60,6 +60,7 @@ async function startXR(){
   // =====================================================================
 
   const refSpace = await session.requestReferenceSpace('local-floor');
+  const viewerSpace = await session.requestReferenceSpace('viewer');
   log('XR session started');
 
   session.addEventListener('end', ()=>log('XR session ended'));
@@ -73,11 +74,11 @@ async function startXR(){
     // 采手部数据并发回电脑
     for (const source of session.inputSources) {
       if (!source.hand) continue;
-      const out = { t: time, space: 'local-floor', hand: source.handedness, joints: {} };
+      const out = { t: time, space: 'viewer', hand: source.handedness, joints: {} };
       for (const j of JOINTS){
         const js = source.hand.get(j);
         if (!js) continue;
-        const pose = frame.getJointPose(js, refSpace);
+        const pose = frame.getJointPose(js, viewerSpace);
         if (!pose) continue;
         const p = pose.transform.position, q = pose.transform.orientation;
         out.joints[j] = { x:p.x, y:p.y, z:p.z, qx:q.x, qy:q.y, qz:q.z, qw:q.w, radius: pose.radius ?? null };
