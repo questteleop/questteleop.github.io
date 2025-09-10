@@ -18,6 +18,19 @@
   <div id="log"></div>
 
 <script>
+// === 追踪判定参数 & 状态（放在 <script> 顶部或 startXR 外部）===
+const MIN_JOINTS = 21;         // 至少这么多关节才认为一帧有效
+const GOOD_FRAMES_TO_LOCK = 3;  // 连续好帧达到这个数 -> 进入 TRACKED
+const BAD_FRAMES_TO_LOSE  = 8;  // 连续坏帧达到这个数 -> 进入 LOST
+const TRACK = { left: {state:'LOST',good:0,bad:0}, right:{state:'LOST',good:0,bad:0} };
+
+function gateTrack(handedness, isGood) {
+  const st = TRACK[handedness] || (TRACK[handedness] = {state:'LOST',good:0,bad:0});
+  if (isGood) { st.good++; st.bad = 0; if (st.state === 'LOST' && st.good >= GOOD_FRAMES_TO_LOCK) st.state = 'TRACKED'; }
+  else        { st.bad++;  st.good= 0; if (st.state === 'TRACKED' && st.bad  >= BAD_FRAMES_TO_LOSE ) st.state = 'LOST';    }
+  return st.state === 'TRACKED';
+}
+
 // === 1) 固定的坐标系旋转：viewer -> 你要的新系 ===
 function transformPos(p) {
   // p: {x,y,z} in viewer
@@ -96,29 +109,51 @@ async function startXR(){
   const onFrame = (time, frame) => {
     const baseLayer = session.renderState.baseLayer;
     gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
-    gl.clearColor(0.02, 0.02, 0.04, 1.0);                  // 随便清个背景
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);   // 只要清屏就算“呈现了”
-
-    // 采手部数据并发回电脑
+    gl.clearColor(0.02, 0.02, 0.04, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  
+    // 采手部数据并发回电脑（仅在“追踪状态”才发送）
     for (const source of session.inputSources) {
       if (!source.hand) continue;
-      const out = { t: time, space: 'viewer', hand: source.handedness, joints: {} };
-      for (const j of JOINTS){
+  
+      const handed = source.handedness;   // 'left' | 'right'
+      const joints = {};
+      let validCount = 0;
+  
+      for (const j of JOINTS) {
         const js = source.hand.get(j);
         if (!js) continue;
-        const pose = frame.getJointPose(js, viewerSpace);
+  
+        const pose = frame.getJointPose(js, viewerSpace);  // 你当前用的是头显系
         if (!pose) continue;
-        const p = pose.transform.position, q = pose.transform.orientation;
-        // 位置：线性变换
+        // 半可靠的“是否追踪到该关节”判据：radius 为 null/undefined 时通常是未追踪
+        if (pose.radius == null) continue;
+  
+        const p = pose.transform.position;
+        const q = pose.transform.orientation;
+  
+        // 位置：线性变换（你自定义的 FLU：+X前、+Y左、+Z上）
         const P = transformPos(p);
-        
+  
         // 朝向：q' = qR ⊗ q ⊗ qR^{-1}
         const q2 = quatNorm(quatMul(quatMul(qR, q), qR_inv));
-        out.joints[j] = { x:P.x, y:P.y, z:P.z, qx:q2.x, qy:q2.y, qz:q2.z, qw:q2.w, radius: pose.radius ?? null };
+  
+        joints[j] = { x: P.x, y: P.y, z: P.z, qx: q2.x, qy: q2.y, qz: q2.z, qw: q2.w, radius: pose.radius };
+        validCount++;
       }
-      if (socket && socket.readyState === 1) socket.send(JSON.stringify(out));
+  
+      // —— 小状态机门控：只有在“追踪中”才发送 —— 
+      const isGood = validCount >= MIN_JOINTS;
+      const trackedNow = gateTrack(handed, isGood);
+      if (!trackedNow) continue;
+  
+      // 构造并发送
+      const out = { t: time, space: 'viewer', hand: handed, joints };
+      if (socket && socket.readyState === 1) {
+        socket.send(JSON.stringify(out));
+      }
     }
-
+  
     session.requestAnimationFrame(onFrame);
   };
   session.requestAnimationFrame(onFrame);
