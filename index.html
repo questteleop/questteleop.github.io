@@ -18,6 +18,34 @@
   <div id="log"></div>
 
 <script>
+// === 1) 固定的坐标系旋转：viewer -> 你要的新系 ===
+function transformPos(p) {
+  // p: {x,y,z} in viewer
+  // new: X'=-Z, Y'=-X, Z'=+Y
+  return { x: -p.z, y: -p.x, z:  p.y };
+}
+
+// === 2) 四元数工具 ===
+function quatMul(a, b) {
+  // (ax,ay,az,aw) ⊗ (bx,by,bz,bw)
+  return {
+    x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+    y: a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+    z: a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+    w: a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+  };
+}
+function quatConj(q){ return {x:-q.x, y:-q.y, z:-q.z, w:q.w}; }
+function quatNorm(q){
+  const n = Math.hypot(q.x, q.y, q.z, q.w) || 1;
+  return {x:q.x/n, y:q.y/n, z:q.z/n, w:q.w/n};
+}
+
+// === 3) 这个 q_R 就是把轴从 viewer 映射到你新系的固定旋转 ===
+// 对应 R=[[0,0,-1],[-1,0,0],[0,1,0]]
+const qR = { x:-0.5, y: 0.5, z: 0.5, w:-0.5 };
+const qR_inv = quatConj(qR); // 单位四元数的逆就是共轭  
+  
 const JOINTS = [
   "wrist",
   "thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx-distal","thumb-tip",
@@ -81,7 +109,12 @@ async function startXR(){
         const pose = frame.getJointPose(js, viewerSpace);
         if (!pose) continue;
         const p = pose.transform.position, q = pose.transform.orientation;
-        out.joints[j] = { x:p.x, y:p.y, z:p.z, qx:q.x, qy:q.y, qz:q.z, qw:q.w, radius: pose.radius ?? null };
+        // 位置：线性变换
+        const P = transformPos(p);
+        
+        // 朝向：q' = qR ⊗ q ⊗ qR^{-1}
+        const q2 = quatNorm(quatMul(quatMul(qR, q), qR_inv));
+        out.joints[j] = { x:P.x, y:P.y, z:P.z, qx:q2.x, qy:q2.y, qz:q2.z, qw:q2.w, radius: pose.radius ?? null };
       }
       if (socket && socket.readyState === 1) socket.send(JSON.stringify(out));
     }
