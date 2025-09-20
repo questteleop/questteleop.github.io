@@ -132,13 +132,14 @@ async function startXR(){
         const p = pose.transform.position;
         const q = pose.transform.orientation;
   
-        // 位置：线性变换（你自定义的 FLU：+X前、+Y左、+Z上）
-        const P = transformPos(p);
+        // // 位置：线性变换（你自定义的 FLU：+X前、+Y左、+Z上）
+        // const P = transformPos(p);
   
-        // 朝向：q' = qR ⊗ q ⊗ qR^{-1}
-        const q2 = quatNorm(quatMul(quatMul(qR, q), qR_inv));
+        // // 朝向：q' = qR ⊗ q ⊗ qR^{-1}
+        // const q2 = quatNorm(quatMul(quatMul(qR, q), qR_inv));
   
-        joints[j] = { x: P.x, y: P.y, z: P.z, qx: q2.x, qy: q2.y, qz: q2.z, qw: q2.w, radius: pose.radius };
+        // joints[j] = { x: P.x, y: P.y, z: P.z, qx: q2.x, qy: q2.y, qz: q2.z, qw: q2.w, radius: pose.radius };
+        joints[j] = { x: p.x, y: p.y, z: p.z, qx: q.x, qy: q.y, qz: q.z, qw: q.w, radius: pose.radius };
         validCount++;
       }
   
