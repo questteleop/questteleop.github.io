@@ -2,20 +2,20 @@
 <html lang="zh">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WebXR Hand + Sim Viewer (Inline)</title>
+<title>WebXR Hand + Sim Viewer (Immersive VR, No Render)</title>
 <style>
-  body { font-family: system-ui, sans-serif; padding: 24px; }
+  body { font-family: system-ui, sans-serif; padding: 24px; background: #111; color: #eee; }
   button { font-size: 16px; padding: 10px 16px; }
   #log { white-space: pre-wrap; margin-top: 12px; font-family: ui-monospace, monospace; }
-  #sim { width: 90vw; display: block; margin-top: 10px; border: 2px solid #333; }
+  #sim { width: 90vw; display: block; margin-top: 10px; border: 2px solid #444; }
 </style>
 <body>
-  <h1>WebXR 手部采集 + 仿真画面 (Inline)</h1>
-  <p>在 Quest 浏览器里打开本页，输入 WSS 地址，点击按钮开始手部追踪并显示仿真画面。</p>
+  <h1>WebXR 手部采集 + 仿真画面</h1>
+  <p>在 Quest 浏览器里打开本页，输入 WSS 地址，点击按钮进入 VR 并开始手部追踪。</p>
   <label>WSS 地址：
     <input id="ws" style="width: min(600px, 80vw)" value="wss://mournfully-fulvous-lashonda.ngrok-free.dev">
   </label>
-  <div><button id="enter">开始手部追踪 + 仿真显示</button></div>
+  <div><button id="enter">进入 VR (手部追踪 + 仿真显示)</button></div>
   <div id="log"></div>
 
   <!-- 用于显示 sim_runner 推来的画面 -->
@@ -76,8 +76,6 @@ function connectWS(){
         document.getElementById("sim").src = "data:image/jpeg;base64," + data.frame;
         return;
       }
-      // 可选：打印手部数据
-      // console.log("Hand data:", data);
     } catch(e){
       console.warn("WS message parse error:", e);
     }
@@ -85,31 +83,27 @@ function connectWS(){
 }
 
 async function startXR(){
-  connectWS(); // 先连 WS
+  connectWS();
 
   if (!('xr' in navigator)) { log("WebXR 不可用"); return; }
-
-  // ✅ 改成 inline session，避免沉浸模式遮挡网页
-  const ok = await navigator.xr.isSessionSupported('inline');
-  if (!ok) { log("inline XR 不受支持"); return; }
+  const ok = await navigator.xr.isSessionSupported('immersive-vr');
+  if (!ok) { log("immersive-vr 不受支持"); return; }
 
   let session;
   try{
-    session = await navigator.xr.requestSession('inline', {
-      optionalFeatures: ['hand-tracking', 'local-floor']
+    // ✅ 进入 immersive-vr，但不创建渲染图层
+    session = await navigator.xr.requestSession('immersive-vr', {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: ['hand-tracking']
     });
   }catch(e){
     log("requestSession 失败：" + e); return;
   }
 
-  const canvas = document.createElement('canvas');
-  const gl = canvas.getContext('webgl', { xrCompatible: true });
-  await gl.makeXRCompatible();
-  session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+  log("VR session started (no render layer)");
 
   const viewerSpace = await session.requestReferenceSpace('viewer');
-  log('XR inline session started');
-  session.addEventListener('end', ()=>log('XR session ended'));
+  session.addEventListener('end', ()=>log('VR session ended'));
 
   const onFrame = (time, frame) => {
     for (const source of session.inputSources) {
