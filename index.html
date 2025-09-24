@@ -2,7 +2,7 @@
 <html lang="zh">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WebXR Hand + Sim Viewer</title>
+<title>WebXR Hand + Sim Viewer (Inline)</title>
 <style>
   body { font-family: system-ui, sans-serif; padding: 24px; }
   button { font-size: 16px; padding: 10px 16px; }
@@ -10,19 +10,19 @@
   #sim { width: 90vw; display: block; margin-top: 10px; border: 2px solid #333; }
 </style>
 <body>
-  <h1>WebXR 手部关节采集 + 仿真画面</h1>
-  <p>在 Quest 浏览器里打开本页，输入 WSS 地址，点击按钮进入 VR 并允许“手部追踪”。</p>
+  <h1>WebXR 手部采集 + 仿真画面 (Inline)</h1>
+  <p>在 Quest 浏览器里打开本页，输入 WSS 地址，点击按钮开始手部追踪并显示仿真画面。</p>
   <label>WSS 地址：
     <input id="ws" style="width: min(600px, 80vw)" value="wss://mournfully-fulvous-lashonda.ngrok-free.dev">
   </label>
-  <div><button id="enter">进入 WebXR（手势 + 仿真显示）</button></div>
+  <div><button id="enter">开始手部追踪 + 仿真显示</button></div>
   <div id="log"></div>
 
   <!-- 用于显示 sim_runner 推来的画面 -->
   <img id="sim" alt="仿真画面将在这里显示">
 
 <script>
-// === 追踪判定参数 & 状态 ===
+// === 参数 & 状态 ===
 const MIN_JOINTS = 21;
 const GOOD_FRAMES_TO_LOCK = 3;
 const BAD_FRAMES_TO_LOSE  = 8;
@@ -35,7 +35,7 @@ function gateTrack(handedness, isGood) {
   return st.state === 'TRACKED';
 }
 
-// === 坐标转换 + 四元数工具 ===
+// === 工具函数 ===
 function transformPos(p) { return { x: -p.z, y: -p.x, z:  p.y }; }
 function quatMul(a, b) {
   return {
@@ -53,7 +53,6 @@ function quatNorm(q){
 const qR = { x:-0.5, y: 0.5, z: 0.5, w:-0.5 };
 const qR_inv = quatConj(qR);
 
-// === 手部关节名称 ===
 const JOINTS = [
   "wrist",
   "thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx-distal","thumb-tip",
@@ -74,11 +73,10 @@ function connectWS(){
     try {
       const data = JSON.parse(event.data);
       if (data.frame) {
-        // 显示仿真画面
         document.getElementById("sim").src = "data:image/jpeg;base64," + data.frame;
         return;
       }
-      // 如果需要处理手部数据，可以在这里调用你的逻辑
+      // 可选：打印手部数据
       // console.log("Hand data:", data);
     } catch(e){
       console.warn("WS message parse error:", e);
@@ -87,38 +85,33 @@ function connectWS(){
 }
 
 async function startXR(){
-  connectWS(); // 先连接 WS
+  connectWS(); // 先连 WS
 
-  if (!('xr' in navigator)) { log("WebXR 不可用（需 HTTPS/最新 Quest 浏览器）"); return; }
+  if (!('xr' in navigator)) { log("WebXR 不可用"); return; }
 
-  const ok = await navigator.xr.isSessionSupported('immersive-vr');
-  if (!ok) { log("immersive-vr 不受支持"); return; }
+  // ✅ 改成 inline session，避免沉浸模式遮挡网页
+  const ok = await navigator.xr.isSessionSupported('inline');
+  if (!ok) { log("inline XR 不受支持"); return; }
 
   let session;
   try{
-    session = await navigator.xr.requestSession('immersive-vr', {
-      requiredFeatures: ['local-floor'],
-      optionalFeatures: ['hand-tracking']
+    session = await navigator.xr.requestSession('inline', {
+      optionalFeatures: ['hand-tracking', 'local-floor']
     });
   }catch(e){
     log("requestSession 失败：" + e); return;
   }
 
   const canvas = document.createElement('canvas');
-  const gl = canvas.getContext('webgl', { xrCompatible: true, alpha:false, antialias:true });
+  const gl = canvas.getContext('webgl', { xrCompatible: true });
   await gl.makeXRCompatible();
   session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
 
   const viewerSpace = await session.requestReferenceSpace('viewer');
-  log('XR session started');
+  log('XR inline session started');
   session.addEventListener('end', ()=>log('XR session ended'));
 
   const onFrame = (time, frame) => {
-    const baseLayer = session.renderState.baseLayer;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
-    gl.clearColor(0.02, 0.02, 0.04, 1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
     for (const source of session.inputSources) {
       if (!source.hand) continue;
       const handed = source.handedness;
