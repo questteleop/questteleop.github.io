@@ -11,9 +11,10 @@
 </style>
 <body>
   <h1>WebXR 手部追踪 + 仿真显示</h1>
-  <label>WSS 地址：
-    <input id="ws" style="width: min(600px, 80vw)" value="wss://mournfully-fulvous-lashonda.ngrok-free.dev">
+  <label>WS 地址：
+    <input id="ws" style="width: min(600px, 80vw)" value="ws://YOUR-IP:8765/sub">
   </label>
+  <button id="connect">仅连接WS</button>
   <button id="enter">进入 VR 并开始手势</button>
   <div id="log"></div>
   <img id="sim" alt="仿真画面将在这里显示">
@@ -45,18 +46,27 @@ function log(txt){console.log(txt);document.getElementById('log').textContent=tx
 
 function connectWS(){
   const url=document.getElementById("ws").value;
+  log("Connecting to "+url);
   socket=new WebSocket(url);
-  socket.onopen=()=>log("WS connected to "+url);
+  socket.onopen=()=>log("✅ WS connected to "+url);
   socket.onmessage=(ev)=>{
     try{
       const data=JSON.parse(ev.data);
-      if(data.frame){document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;}
+      if(data.frame){
+        console.log("[browser] got frame, len=",data.frame.length);
+        document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
+      }
     }catch(e){console.warn("WS msg parse error:",e);}
   };
+  socket.onerror=(e)=>console.error("WS error:",e);
+  socket.onclose=()=>log("❌ WS closed");
 }
 
+document.getElementById("connect").addEventListener("click", connectWS);
+
+// ---- WebXR + 手势追踪 ----
 async function startXR(){
-  connectWS();
+  if(!socket) connectWS(); // 确保已经连接
   if(!('xr' in navigator)){log("WebXR 不可用");return;}
   const ok=await navigator.xr.isSessionSupported('immersive-vr');
   if(!ok){log("immersive-vr 不受支持");return;}
@@ -69,7 +79,6 @@ async function startXR(){
     });
   }catch(e){log("requestSession 失败："+e);return;}
 
-  // 关键：创建XRWebGLLayer防止Quest挂起
   const canvas=document.createElement('canvas');
   const gl=canvas.getContext('webgl',{xrCompatible:true});
   await gl.makeXRCompatible();
@@ -81,8 +90,7 @@ async function startXR(){
     for(const source of session.inputSources){
       if(!source.hand) continue;
       const handed=source.handedness;
-      const joints={}, q2s={};
-      let validCount=0;
+      const joints={}; let validCount=0;
       for(const j of JOINTS){
         const js=source.hand.get(j);
         if(!js)continue;
@@ -96,12 +104,16 @@ async function startXR(){
       }
       if(!gateTrack(handed,validCount>=MIN_JOINTS))continue;
       const out={t:time,space:'viewer',hand:handed,joints};
-      if(socket&&socket.readyState===1)socket.send(JSON.stringify(out));
+      if(socket&&socket.readyState===1){
+        socket.send(JSON.stringify(out));
+        console.log("[browser] sent joints frame, joints=",validCount);
+      }
     }
     session.requestAnimationFrame(onFrame);
   });
 }
-document.getElementById("enter").addEventListener("click",startXR);
+
+document.getElementById("enter").addEventListener("click", startXR);
 </script>
 </body>
 </html>
