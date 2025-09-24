@@ -2,26 +2,30 @@
 <html lang="zh">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WebXR Hand → Python Stream</title>
+<title>WebXR Hand + Sim Viewer</title>
 <style>
   body { font-family: system-ui, sans-serif; padding: 24px; }
   button { font-size: 16px; padding: 10px 16px; }
   #log { white-space: pre-wrap; margin-top: 12px; font-family: ui-monospace, monospace; }
+  #sim { width: 90vw; display: block; margin-top: 10px; border: 2px solid #333; }
 </style>
 <body>
-  <h1>WebXR 手部关节采集 → WebSocket</h1>
-  <p>在 Quest 浏览器里打开本页，点击下方按钮进入 VR，并允许“手部追踪”。</p>
+  <h1>WebXR 手部关节采集 + 仿真画面</h1>
+  <p>在 Quest 浏览器里打开本页，输入 WSS 地址，点击按钮进入 VR 并允许“手部追踪”。</p>
   <label>WSS 地址：
-    <input id="ws" style="width: min(600px, 80vw)" value="wss://undisposed-westin-unpromotable.ngrok-free.app">
+    <input id="ws" style="width: min(600px, 80vw)" value="wss://mournfully-fulvous-lashonda.ngrok-free.dev">
   </label>
-  <div><button id="enter">进入 WebXR（手势）</button></div>
+  <div><button id="enter">进入 WebXR（手势 + 仿真显示）</button></div>
   <div id="log"></div>
 
+  <!-- 用于显示 sim_runner 推来的画面 -->
+  <img id="sim" alt="仿真画面将在这里显示">
+
 <script>
-// === 追踪判定参数 & 状态（放在 <script> 顶部或 startXR 外部）===
-const MIN_JOINTS = 21;         // 至少这么多关节才认为一帧有效
-const GOOD_FRAMES_TO_LOCK = 3;  // 连续好帧达到这个数 -> 进入 TRACKED
-const BAD_FRAMES_TO_LOSE  = 8;  // 连续坏帧达到这个数 -> 进入 LOST
+// === 追踪判定参数 & 状态 ===
+const MIN_JOINTS = 21;
+const GOOD_FRAMES_TO_LOCK = 3;
+const BAD_FRAMES_TO_LOSE  = 8;
 const TRACK = { left: {state:'LOST',good:0,bad:0}, right:{state:'LOST',good:0,bad:0} };
 
 function gateTrack(handedness, isGood) {
@@ -31,16 +35,9 @@ function gateTrack(handedness, isGood) {
   return st.state === 'TRACKED';
 }
 
-// === 1) 固定的坐标系旋转：viewer -> 你要的新系 ===
-function transformPos(p) {
-  // p: {x,y,z} in viewer
-  // new: X'=-Z, Y'=-X, Z'=+Y
-  return { x: -p.z, y: -p.x, z:  p.y };
-}
-
-// === 2) 四元数工具 ===
+// === 坐标转换 + 四元数工具 ===
+function transformPos(p) { return { x: -p.z, y: -p.x, z:  p.y }; }
 function quatMul(a, b) {
-  // (ax,ay,az,aw) ⊗ (bx,by,bz,bw)
   return {
     x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
     y: a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
@@ -53,12 +50,10 @@ function quatNorm(q){
   const n = Math.hypot(q.x, q.y, q.z, q.w) || 1;
   return {x:q.x/n, y:q.y/n, z:q.z/n, w:q.w/n};
 }
-
-// === 3) 这个 q_R 就是把轴从 viewer 映射到你新系的固定旋转 ===
-// 对应 R=[[0,0,-1],[-1,0,0],[0,1,0]]
 const qR = { x:-0.5, y: 0.5, z: 0.5, w:-0.5 };
-const qR_inv = quatConj(qR); // 单位四元数的逆就是共轭  
-  
+const qR_inv = quatConj(qR);
+
+// === 手部关节名称 ===
 const JOINTS = [
   "wrist",
   "thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx-distal","thumb-tip",
@@ -68,42 +63,54 @@ const JOINTS = [
   "pinky-finger-metacarpal","pinky-finger-phalanx-proximal","pinky-finger-phalanx-intermediate","pinky-finger-phalanx-distal","pinky-finger-tip",
 ];
 
-const WS_URL = "wss://mournfully-fulvous-lashonda.ngrok-free.dev"; // ← 改成你的
 let socket = null;
-function log(txt){ console.log(txt); const el = document.getElementById('log'); if(el) el.textContent = txt; }
+function log(txt){ console.log(txt); document.getElementById('log').textContent = txt; }
+
+function connectWS(){
+  const url = document.getElementById("ws").value;
+  socket = new WebSocket(url);
+  socket.onopen = ()=>log("WS connected to " + url);
+  socket.onmessage = (event)=>{
+    try {
+      const data = JSON.parse(event.data);
+      if (data.frame) {
+        // 显示仿真画面
+        document.getElementById("sim").src = "data:image/jpeg;base64," + data.frame;
+        return;
+      }
+      // 如果需要处理手部数据，可以在这里调用你的逻辑
+      // console.log("Hand data:", data);
+    } catch(e){
+      console.warn("WS message parse error:", e);
+    }
+  };
+}
 
 async function startXR(){
+  connectWS(); // 先连接 WS
+
   if (!('xr' in navigator)) { log("WebXR 不可用（需 HTTPS/最新 Quest 浏览器）"); return; }
 
-  // 连接 WebSocket（可选，不连也不会影响呈现）
-  try { socket = new WebSocket(WS_URL); socket.onopen=()=>log("WS connected"); } catch(e){ log("WS 连接失败(可先忽略)："+e); }
-
-  // 检查 immersive-vr 支持
   const ok = await navigator.xr.isSessionSupported('immersive-vr');
   if (!ok) { log("immersive-vr 不受支持"); return; }
 
-  // 创建 Session（关键：后面会设置 XRWebGLLayer）
   let session;
   try{
     session = await navigator.xr.requestSession('immersive-vr', {
       requiredFeatures: ['local-floor'],
-      optionalFeatures: ['hand-tracking'] // 要手部数据
+      optionalFeatures: ['hand-tracking']
     });
   }catch(e){
     log("requestSession 失败：" + e); return;
   }
 
-  // ====== 关键补丁：创建 WebGL 并设置 XRWebGLLayer，防止“三个点” ======
-  const canvas = document.createElement('canvas');          // 不必插到 DOM
+  const canvas = document.createElement('canvas');
   const gl = canvas.getContext('webgl', { xrCompatible: true, alpha:false, antialias:true });
   await gl.makeXRCompatible();
   session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
-  // =====================================================================
 
-  const refSpace = await session.requestReferenceSpace('local-floor');
   const viewerSpace = await session.requestReferenceSpace('viewer');
   log('XR session started');
-
   session.addEventListener('end', ()=>log('XR session ended'));
 
   const onFrame = (time, frame) => {
@@ -111,49 +118,33 @@ async function startXR(){
     gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer);
     gl.clearColor(0.02, 0.02, 0.04, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  
-    // 采手部数据并发回电脑（仅在“追踪状态”才发送）
+
     for (const source of session.inputSources) {
       if (!source.hand) continue;
-  
-      const handed = source.handedness;   // 'left' | 'right'
+      const handed = source.handedness;
       const joints = {};
       let validCount = 0;
-  
+
       for (const j of JOINTS) {
         const js = source.hand.get(j);
         if (!js) continue;
-  
-        const pose = frame.getJointPose(js, viewerSpace);  // 你当前用的是头显系
-        if (!pose) continue;
-        // 半可靠的“是否追踪到该关节”判据：radius 为 null/undefined 时通常是未追踪
-        if (pose.radius == null) continue;
-  
+        const pose = frame.getJointPose(js, viewerSpace);
+        if (!pose || pose.radius == null) continue;
+
         const p = pose.transform.position;
         const q = pose.transform.orientation;
-  
-        // 位置：线性变换（你自定义的 FLU：+X前、+Y左、+Z上）
         const P = transformPos(p);
-  
-        // 朝向：q' = qR ⊗ q ⊗ qR^{-1}
         const q2 = quatNorm(quatMul(quatMul(qR, q), qR_inv));
-  
         joints[j] = { x: P.x, y: P.y, z: P.z, qx: q2.x, qy: q2.y, qz: q2.z, qw: q2.w, radius: pose.radius };
         validCount++;
       }
-  
-      // —— 小状态机门控：只有在“追踪中”才发送 —— 
-      const isGood = validCount >= MIN_JOINTS;
-      const trackedNow = gateTrack(handed, isGood);
+
+      const trackedNow = gateTrack(handed, validCount >= MIN_JOINTS);
       if (!trackedNow) continue;
-  
-      // 构造并发送
+
       const out = { t: time, space: 'viewer', hand: handed, joints };
-      if (socket && socket.readyState === 1) {
-        socket.send(JSON.stringify(out));
-      }
+      if (socket && socket.readyState === 1) socket.send(JSON.stringify(out));
     }
-  
     session.requestAnimationFrame(onFrame);
   };
   session.requestAnimationFrame(onFrame);
