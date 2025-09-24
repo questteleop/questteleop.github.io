@@ -2,16 +2,16 @@
 <html lang="zh">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WebXR 手部追踪 + 仿真显示</title>
+<title>WebXR Hand → Python Stream + 仿真画面</title>
 <style>
-  body { font-family: system-ui, sans-serif; background:#111; color:#eee; padding: 16px;}
-  button { font-size: 16px; padding: 8px 14px; margin-top: 6px;}
-  #log { margin-top: 12px; white-space: pre-wrap; font-family: ui-monospace, monospace;}
-  #sim { width: 90vw; max-width: 1280px; display: block; margin-top: 10px; border: 2px solid #333; }
+  body { font-family: system-ui, sans-serif; padding: 24px; background: #111; color: #eee;}
+  button { font-size: 16px; padding: 10px 16px; }
+  #log { white-space: pre-wrap; margin-top: 12px; font-family: ui-monospace, monospace; }
+  #sim { display:block; margin-top:10px; max-width:90vw; border:2px solid #333;}
 </style>
 <body>
-  <h1>WebXR 手部关节采集 + 仿真画面</h1>
-  <p>在 Quest 浏览器里打开本页，点击下方按钮进入 VR 并启动手势采集</p>
+  <h1>WebXR 手部关节采集 → WebSocket + 仿真画面显示</h1>
+  <p>在 Quest 浏览器里打开本页，点击下方按钮进入 VR，并允许“手部追踪”。</p>
   <label>WSS 地址：
     <input id="ws" style="width: min(600px, 80vw)" value="wss://mournfully-fulvous-lashonda.ngrok-free.dev/sub">
   </label>
@@ -20,30 +20,35 @@
   <img id="sim" alt="仿真画面将在这里显示">
 
 <script>
-// === 参数与状态 ===
 const MIN_JOINTS = 21, GOOD_FRAMES_TO_LOCK = 3, BAD_FRAMES_TO_LOSE = 8;
 const TRACK = { left: {state:'LOST',good:0,bad:0}, right:{state:'LOST',good:0,bad:0} };
 
 function gateTrack(handedness, isGood) {
   const st = TRACK[handedness] || (TRACK[handedness] = {state:'LOST',good:0,bad:0});
   if (isGood) { st.good++; st.bad = 0; if (st.state === 'LOST' && st.good >= GOOD_FRAMES_TO_LOCK) st.state = 'TRACKED'; }
-  else { st.bad++; st.good= 0; if (st.state === 'TRACKED' && st.bad >= BAD_FRAMES_TO_LOSE ) st.state = 'LOST'; }
+  else { st.bad++; st.good= 0; if (st.state === 'TRACKED' && st.bad  >= BAD_FRAMES_TO_LOSE ) st.state = 'LOST'; }
   return st.state === 'TRACKED';
 }
 
 function transformPos(p) { return { x: -p.z, y: -p.x, z: p.y }; }
-function quatMul(a,b){return{
-  x:a.w*b.x+a.x*b.w+a.y*b.z-a.z*b.y,
-  y:a.w*b.y-a.x*b.z+a.y*b.w+a.z*b.x,
-  z:a.w*b.z+a.x*b.y-a.y*b.x+a.z*b.w,
-  w:a.w*b.w-a.x*b.x-a.y*b.y-a.z*b.z};}
-function quatConj(q){return {x:-q.x,y:-q.y,z:-q.z,w:q.w};}
-function quatNorm(q){const n=Math.hypot(q.x,q.y,q.z,q.w)||1;return{x:q.x/n,y:q.y/n,z:q.z/n,w:q.w/n};}
-const qR = { x:-0.5, y: 0.5, z: 0.5, w:-0.5 }, qR_inv = quatConj(qR);
+function quatMul(a, b) {
+  return {
+    x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+    y: a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+    z: a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+    w: a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+  };
+}
+function quatConj(q){ return {x:-q.x, y:-q.y, z:-q.z, w:q.w}; }
+function quatNorm(q){
+  const n = Math.hypot(q.x, q.y, q.z, q.w) || 1;
+  return {x:q.x/n, y:q.y/n, z:q.z/n, w:q.w/n};
+}
+const qR = { x:-0.5, y: 0.5, z: 0.5, w:-0.5 };
+const qR_inv = quatConj(qR);
 
 const JOINTS = [
-  "wrist",
-  "thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx-distal","thumb-tip",
+  "wrist","thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx-distal","thumb-tip",
   "index-finger-metacarpal","index-finger-phalanx-proximal","index-finger-phalanx-intermediate","index-finger-phalanx-distal","index-finger-tip",
   "middle-finger-metacarpal","middle-finger-phalanx-proximal","middle-finger-phalanx-intermediate","middle-finger-phalanx-distal","middle-finger-tip",
   "ring-finger-metacarpal","ring-finger-phalanx-proximal","ring-finger-phalanx-intermediate","ring-finger-phalanx-distal","ring-finger-tip",
@@ -54,27 +59,23 @@ let socket = null;
 function log(txt){ console.log(txt); document.getElementById('log').textContent = txt; }
 
 function connectWS(){
-  const url = document.getElementById("ws").value;
+  const url = document.getElementById('ws').value;
   socket = new WebSocket(url);
   socket.onopen = ()=>log("WS connected to "+url);
   socket.onmessage = (ev)=>{
     try{
       const data = JSON.parse(ev.data);
       if(data.frame){
-        console.log("[browser] got frame, length=", data.frame.length);
+        console.log("[browser] got frame, len=", data.frame.length);
         document.getElementById("sim").src = "data:image/jpeg;base64," + data.frame;
-      } else {
-        console.log("[browser] got non-frame data:", data);
       }
-    }catch(e){
-      console.warn("WS msg parse error:", e, ev.data);
-    }
+    }catch(e){ console.warn("WS parse error:", e); }
   };
 }
 
 async function startXR(){
   connectWS();
-  if (!('xr' in navigator)) { log("WebXR 不可用"); return; }
+  if (!('xr' in navigator)) { log("WebXR 不可用（需 HTTPS/最新 Quest 浏览器）"); return; }
   const ok = await navigator.xr.isSessionSupported('immersive-vr');
   if (!ok) { log("immersive-vr 不受支持"); return; }
 
@@ -84,13 +85,10 @@ async function startXR(){
       requiredFeatures: ['local-floor'],
       optionalFeatures: ['hand-tracking']
     });
-  }catch(e){
-    log("requestSession 失败：" + e); return;
-  }
+  }catch(e){ log("requestSession 失败："+e); return; }
 
-  // 创建XRWebGLLayer防止Quest黑屏
   const canvas = document.createElement('canvas');
-  const gl = canvas.getContext('webgl',{xrCompatible:true});
+  const gl = canvas.getContext('webgl',{xrCompatible:true, alpha:false});
   await gl.makeXRCompatible();
   session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
 
@@ -109,7 +107,7 @@ async function startXR(){
         const P = transformPos(pose.transform.position);
         const q = pose.transform.orientation;
         const q2 = quatNorm(quatMul(quatMul(qR, q), qR_inv));
-        joints[j] = { x:P.x, y:P.y, z:P.z, qx:q2.x, qy:q2.y, qz:q2.z, qw:q2.w, radius:pose.radius };
+        joints[j] = { x: P.x, y: P.y, z: P.z, qx: q2.x, qy: q2.y, qz: q2.z, qw: q2.w, radius: pose.radius };
         validCount++;
       }
       if (!gateTrack(handed, validCount >= MIN_JOINTS)) continue;
