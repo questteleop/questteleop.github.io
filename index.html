@@ -20,7 +20,7 @@
   <img id="sim" alt="仿真画面将在这里显示">
 
 <script>
-// ===== 手部追踪状态机参数 =====
+// ===== 手部追踪状态机参数（原样） =====
 const MIN_JOINTS=21, GOOD_FRAMES_TO_LOCK=3, BAD_FRAMES_TO_LOSE=8;
 const TRACK={left:{state:'LOST',good:0,bad:0}, right:{state:'LOST',good:0,bad:0}};
 function gateTrack(h,good){
@@ -45,25 +45,57 @@ const JOINTS=["wrist","thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx
 
 let wsSend=null, wsRecv=null;
 let frameImageBitmap=null;
-let gl, texture, program, positionBuffer, texcoordBuffer;
 
-function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
+// ===== 显示屏参数（在你眼前的“看板”）=====
+const PANEL_DISTANCE = 1.8;     // 到头部的距离（米）
+const PANEL_WIDTH    = 1.4;     // 面板宽度（米）
+const PANEL_HEIGHT   = 0.9;     // 面板高度（米）
+const PANEL_RX_DEG   = 0;       // 如需微调：围绕X轴旋转（度），>0 往下仰
 
-// === 纹理坐标方向控制（为“我在上面看”修正默认旋转/翻转） ===
-let ORIENT = 270;   // 0/90/180/270；270 通常把“顶上观看”的画面转正
+// === 纹理坐标方向控制（如仍需修正图像上下/左右/旋转） ===
+let ORIENT = 0;     // 0/90/180/270
 let FLIP_X = false;
-let FLIP_Y = true;  // WebGL 与像素坐标 Y 轴相反，默认翻一次
+let FLIP_Y = true;  // 大多数情况下需要Y翻转
 
+// ===== WebGL 变量 =====
+let gl, texture, program3D, pos3DBuffer, uvBuffer;
+
+// ====== 小工具：矩阵 ======
+function deg2rad(d){return d*Math.PI/180;}
+function mat4Identity(){return new Float32Array([1,0,0,0,  0,1,0,0,  0,0,1,0,  0,0,0,1]);}
+function mat4Multiply(a,b){
+  const out=new Float32Array(16);
+  for(let r=0;r<4;r++){
+    for(let c=0;c<4;c++){
+      out[r*4+c]=a[r*4+0]*b[0*4+c]+a[r*4+1]*b[1*4+c]+a[r*4+2]*b[2*4+c]+a[r*4+3]*b[3*4+c];
+    }
+  }
+  return out;
+}
+function mat4Translate(tx,ty,tz){
+  const m=mat4Identity(); m[12]=tx; m[13]=ty; m[14]=tz; return m;
+}
+function mat4RotateX(rad){
+  const c=Math.cos(rad), s=Math.sin(rad);
+  return new Float32Array([1,0,0,0,  0,c,s,0,  0,-s,c,0,  0,0,0,1]);
+}
+
+// ===== 屏幕四边形的顶点（3D）=====
+function buildPanelVertices(){
+  const hw = PANEL_WIDTH/2, hh = PANEL_HEIGHT/2;
+  // Z=0 的竖直面板（在模型坐标里），稍后整体平移到 (0,0,-distance)
+  return new Float32Array([
+    -hw,-hh,0,   hw,-hh,0,   -hw, hh,0,
+    -hw, hh,0,   hw,-hh,0,    hw, hh,0
+  ]);
+}
+// 纹理坐标生成（考虑旋转/翻转）
 function makeTexcoords(orient, flipX, flipY){
-  // 两个三角形（全屏）— 顶点顺序与 a_position 匹配
-  let uv = [
-    0,0,  1,0,  0,1,
-    0,1,  1,0,  1,1
-  ];
+  let uv = [ 0,0, 1,0, 0,1,  0,1, 1,0, 1,1 ];
   function rot90(arr){
-    const out = new Float32Array(arr.length);
-    for(let i=0;i<arr.length;i+=2){ const u=arr[i], v=arr[i+1]; out[i]=v; out[i+1]=1-u; }
-    return Array.from(out);
+    const out = [];
+    for(let i=0;i<arr.length;i+=2){ const u=arr[i], v=arr[i+1]; out.push(v, 1-u); }
+    return out;
   }
   let arr = uv;
   if(orient===90)  arr = rot90(arr);
@@ -77,11 +109,13 @@ function makeTexcoords(orient, flipX, flipY){
 }
 function applyTexcoords(){
   const tc = makeTexcoords(ORIENT, FLIP_X, FLIP_Y);
-  gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
+  gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
   gl.bufferData(gl.ARRAY_BUFFER, tc, gl.STATIC_DRAW);
 }
 
-// ===== 建立两个 WebSocket：发送 + 接收 =====
+function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
+
+// ===== WebSocket（原样）=====
 function setupSockets(){
   const base=document.getElementById('ws').value;
   wsSend=new WebSocket(base);
@@ -94,44 +128,56 @@ function setupSockets(){
       if(data.frame){
         document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
         const blob=await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
-        // 禁用 EXIF 自动旋转，统一由纹理坐标控制方向
-        frameImageBitmap=await createImageBitmap(blob, { imageOrientation: 'none' });
+        // 禁用 EXIF 自动旋转；方向全部交给 UV 控制
+        frameImageBitmap=await createImageBitmap(blob, { imageOrientation:'none' });
       }
     }catch(e){console.warn("WS parse error:",e);}
   };
 }
 
-// ===== 初始化 WebGL Shader =====
+// ===== 初始化 WebGL（3D 管线）=====
 function initGLResources(gl){
-  const vs=`attribute vec2 a_position;attribute vec2 a_texcoord;
-  varying vec2 v_texcoord;void main(){gl_Position=vec4(a_position,0,1);v_texcoord=a_texcoord;}`;
-  const fs=`precision mediump float;varying vec2 v_texcoord;uniform sampler2D u_texture;
-  void main(){gl_FragColor=texture2D(u_texture,v_texcoord);}`;
+  const vs3D=`
+  attribute vec3 a_position;
+  attribute vec2 a_texcoord;
+  uniform mat4 u_viewProj;
+  uniform mat4 u_model;
+  varying vec2 v_uv;
+  void main(){
+    gl_Position = u_viewProj * u_model * vec4(a_position,1.0);
+    v_uv = a_texcoord;
+  }`;
+  const fs=`
+  precision mediump float;
+  varying vec2 v_uv;
+  uniform sampler2D u_texture;
+  void main(){ gl_FragColor = texture2D(u_texture, v_uv); }`;
+
   function compile(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);return s;}
-  const vsObj=compile(gl.VERTEX_SHADER,vs), fsObj=compile(gl.FRAGMENT_SHADER,fs);
-  program=gl.createProgram();gl.attachShader(program,vsObj);gl.attachShader(program,fsObj);gl.linkProgram(program);
+  const vsObj=compile(gl.VERTEX_SHADER,vs3D), fsObj=compile(gl.FRAGMENT_SHADER,fs);
+  program3D=gl.createProgram();gl.attachShader(program3D,vsObj);gl.attachShader(program3D,fsObj);gl.linkProgram(program3D);
 
-  gl.useProgram(program);
-  const uTexLoc = gl.getUniformLocation(program, "u_texture");
-  if (uTexLoc) gl.uniform1i(uTexLoc, 0);
+  // 顶点缓冲：面板 3D 顶点
+  pos3DBuffer=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,pos3DBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, buildPanelVertices(), gl.STATIC_DRAW);
 
-  positionBuffer=gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER,positionBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([
-    -1,-1,  1,-1,  -1, 1,
-    -1, 1,  1,-1,   1, 1
-  ]),gl.STATIC_DRAW);
-
-  texcoordBuffer=gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER,texcoordBuffer);
+  // 纹理坐标缓冲
+  uvBuffer=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,uvBuffer);
   gl.bufferData(gl.ARRAY_BUFFER, makeTexcoords(ORIENT, FLIP_X, FLIP_Y), gl.STATIC_DRAW);
 
+  // 纹理
   texture=gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D,texture);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+
+  gl.useProgram(program3D);
+  const uTexLoc = gl.getUniformLocation(program3D, "u_texture");
+  if (uTexLoc) gl.uniform1i(uTexLoc, 0);
 }
 
 async function startXR(){
@@ -164,26 +210,47 @@ async function startXR(){
       const vp = baseLayer.getViewport(view);
       gl.viewport(vp.x, vp.y, vp.width, vp.height);
 
+      // 组合矩阵：projection * view^-1
+      const proj = view.projectionMatrix;
+      const viewInv = view.transform.inverse.matrix; // 4x4
+      const viewProj = mat4Multiply(proj, viewInv);
+
+      // 模型矩阵：把面板放到头前方，并保持竖直
+      // 模型= 旋转X(PANEL_RX) * 平移(0,0,-PANEL_DISTANCE)
+      let model = mat4Translate(0,0,-PANEL_DISTANCE);
+      if (PANEL_RX_DEG !== 0){
+        model = mat4Multiply(mat4RotateX(deg2rad(PANEL_RX_DEG)), model);
+      }
+
+      // 上传矩阵
+      gl.useProgram(program3D);
+      const uVP = gl.getUniformLocation(program3D,"u_viewProj");
+      const uM  = gl.getUniformLocation(program3D,"u_model");
+      gl.uniformMatrix4fv(uVP,false,viewProj);
+      gl.uniformMatrix4fv(uM,false, model);
+
+      // 背景
+      gl.clearColor(0.05,0.05,0.05,1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      // 如果有帧：更新纹理并绘制
       if(frameImageBitmap){
-        gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D,texture);
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); // 方向交给 texcoord 处理
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); // 方向用 UV 控制
         gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frameImageBitmap);
 
-        gl.useProgram(program);
-        const posLoc=gl.getAttribLocation(program,"a_position");
-        const texLoc=gl.getAttribLocation(program,"a_texcoord");
-        gl.bindBuffer(gl.ARRAY_BUFFER,positionBuffer);
-        gl.enableVertexAttribArray(posLoc);
-        gl.vertexAttribPointer(posLoc,2,gl.FLOAT,false,0,0);
-        gl.bindBuffer(gl.ARRAY_BUFFER,texcoordBuffer);
-        gl.enableVertexAttribArray(texLoc);
-        gl.vertexAttribPointer(texLoc,2,gl.FLOAT,false,0,0);
+        const aPos = gl.getAttribLocation(program3D,"a_position");
+        gl.bindBuffer(gl.ARRAY_BUFFER,pos3DBuffer);
+        gl.enableVertexAttribArray(aPos);
+        gl.vertexAttribPointer(aPos,3,gl.FLOAT,false,0,0);
+
+        const aUV  = gl.getAttribLocation(program3D,"a_texcoord");
+        gl.bindBuffer(gl.ARRAY_BUFFER,uvBuffer);
+        gl.enableVertexAttribArray(aUV);
+        gl.vertexAttribPointer(aUV,2,gl.FLOAT,false,0,0);
+
         gl.drawArrays(gl.TRIANGLES,0,6);
-      } else {
-        gl.clearColor(0.25,0,0,1);
-        gl.clear(gl.COLOR_BUFFER_BIT);
       }
     }
 
