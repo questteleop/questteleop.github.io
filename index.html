@@ -8,21 +8,14 @@
   button { font-size: 16px; padding: 10px 16px; }
   #log { white-space: pre-wrap; margin-top: 12px; font-family: ui-monospace, monospace; }
   #sim { display:block; margin-top:10px; max-width:90vw; border:2px solid #333;}
-  .row {margin-top:8px}
-  .badge {display:inline-block; padding:2px 6px; border:1px solid #444; border-radius:6px; margin-right:6px; font-size:12px; background:#1a1a1a}
 </style>
 <body>
   <h1>WebXR 手部关节采集 → WebSocket + 仿真画面显示</h1>
   <p>在 Quest 浏览器里打开本页，点击按钮进入 VR，并允许“手部追踪”。</p>
   <label>WSS 地址：
-    <!-- ⚠️ 把它改成你当前 ngrok 显示的域：wss://xxxx.ngrok-free.app -->
-    <input id="ws" style="width: min(600px, 80vw)" value="wss://shakia-novelistic-madly.ngrok-free.dev">
+    <input id="ws" style="width: min(600px, 80vw)" value="wss://shakia-novelistic-madly.ngrok-free.app">
   </label>
-  <div class="row">
-    <span class="badge" id="sendStat">send: -</span>
-    <span class="badge" id="recvStat">recv: -</span>
-    <span class="badge" id="framesStat">frames: 0</span>
-  </div>
+  <div><button id="enter">进入 WebXR（手势）</button></div>
   <div id="log"></div>
   <img id="sim" alt="仿真画面将在这里显示">
 
@@ -87,29 +80,6 @@ function mat4RotateX(rad){
   const c=Math.cos(rad), s=Math.sin(rad);
   return new Float32Array([1,0,0,0,  0,c,s,0,  0,-s,c,0,  0,0,0,1]);
 }
-// 通用 4×4 逆矩阵（为双眼一致性准备）
-function mat4Inverse(m){
-  const a=new Float32Array(m), inv=new Float32Array(16);
-  inv[0]=a[5]*a[10]*a[15]-a[5]*a[11]*a[14]-a[9]*a[6]*a[15]+a[9]*a[7]*a[14]+a[13]*a[6]*a[11]-a[13]*a[7]*a[10];
-  inv[4]=-a[4]*a[10]*a[15]+a[4]*a[11]*a[14]+a[8]*a[6]*a[15]-a[8]*a[7]*a[14]-a[12]*a[6]*a[11]+a[12]*a[7]*a[10];
-  inv[8]=a[4]*a[9]*a[15]-a[4]*a[11]*a[13]-a[8]*a[5]*a[15]+a[8]*a[7]*a[13]+a[12]*a[5]*a[11]-a[12]*a[7]*a[9];
-  inv[12]=-a[4]*a[9]*a[14]+a[4]*a[10]*a[13]+a[8]*a[5]*a[14]-a[8]*a[6]*a[13]-a[12]*a[5]*a[10]+a[12]*a[6]*a[9];
-  inv[1]=-a[1]*a[10]*a[15]+a[1]*a[11]*a[14]+a[9]*a[2]*a[15]-a[9]*a[3]*a[14]-a[13]*a[2]*a[11]+a[13]*a[3]*a[10];
-  inv[5]=a[0]*a[10]*a[15]-a[0]*a[11]*a[14]-a[8]*a[2]*a[15]+a[8]*a[3]*a[14]+a[12]*a[2]*a[11]-a[12]*a[3]*a[10];
-  inv[9]=-a[0]*a[9]*a[15]+a[0]*a[11]*a[13]+a[8]*a[1]*a[15]-a[8]*a[3]*a[13]-a[12]*a[1]*a[11]+a[12]*a[3]*a[9];
-  inv[13]=a[0]*a[9]*a[14]-a[0]*a[10]*a[13]-a[8]*a[1]*a[14]+a[8]*a[2]*a[13]+a[12]*a[1]*a[10]-a[12]*a[2]*a[9];
-  inv[2]=a[1]*a[6]*a[15]-a[1]*a[7]*a[14]-a[5]*a[2]*a[15]+a[5]*a[3]*a[14]+a[13]*a[2]*a[7]-a[13]*a[3]*a[6];
-  inv[6]=-a[0]*a[6]*a[15]+a[0]*a[7]*a[14]+a[4]*a[2]*a[15]-a[4]*a[3]*a[14]-a[12]*a[2]*a[7]+a[12]*a[3]*a[6];
-  inv[10]=a[0]*a[5]*a[15]-a[0]*a[7]*a[13]-a[4]*a[1]*a[15]+a[4]*a[3]*a[13]+a[12]*a[1]*a[7]-a[12]*a[3]*a[5];
-  inv[14]=-a[0]*a[5]*a[14]+a[0]*a[6]*a[13]+a[4]*a[1]*a[14]-a[4]*a[2]*a[13]-a[12]*a[1]*a[6]+a[12]*a[2]*a[5];
-  inv[3]=-a[1]*a[6]*a[11]+a[1]*a[7]*a[10]+a[5]*a[2]*a[11]-a[5]*a[3]*a[10]-a[9]*a[2]*a[7]+a[9]*a[3]*a[6];
-  inv[7]=a[0]*a[6]*a[11]-a[0]*a[7]*a[10]-a[4]*a[2]*a[11]+a[4]*a[3]*a[10]+a[8]*a[2]*a[7]-a[8]*a[3]*a[6];
-  inv[11]=-a[0]*a[5]*a[11]+a[0]*a[7]*a[9]+a[4]*a[1]*a[11]-a[4]*a[3]*a[9]-a[8]*a[1]*a[7]+a[8]*a[3]*a[5];
-  inv[15]=a[0]*a[5]*a[10]-a[0]*a[6]*a[9]-a[4]*a[1]*a[10]+a[4]*a[2]*a[9]+a[8]*a[1]*a[6]-a[8]*a[2]*a[5];
-  let det=a[0]*inv[0]+a[1]*inv[4]+a[2]*inv[8]+a[3]*inv[12];
-  if(det===0) return mat4Identity();
-  det=1.0/det; for(let i=0;i<16;i++) inv[i]*=det; return inv;
-}
 
 // ===== 顶点/UV数据 =====
 function buildPanelVertices(){
@@ -147,112 +117,33 @@ function fitPanelToImage(img){
   uploadPanelVertices();
 }
 
-// 简易日志/状态
-const $log = document.getElementById('log');
-const $sendStat = document.getElementById('sendStat');
-const $recvStat = document.getElementById('recvStat');
-const $framesStat = document.getElementById('framesStat');
-let framesCount = 0;
-function log(txt){ console.log(txt); if($log) $log.textContent = txt; }
-function stat(el, txt){ if(el) el.textContent = txt; }
+function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
 
-// ===== WebSocket：自动探测接收路径 =====
-const RECV_CANDIDATES = ["", "/sub", "/ws", "/ws/sub"];
-let chosenRecvPath = null;
-let recvAttemptIndex = 0;
-let recvConnTries = 0;
-let heartbeatTimer = null;
-
-function buildURL(base, path){
-  if(!path) return base;
-  if(base.endsWith("/")) base = base.slice(0,-1);
-  return base + path;
-}
-
+// ===== WebSocket（改动：接收端不再固定 /sub）=====
 function setupSockets(){
   const base=document.getElementById('ws').value.trim();
-  // 发送端：固定用 base
-  try {
-    wsSend = new WebSocket(base);
-    wsSend.onopen = ()=>{
-      stat($sendStat, "send: connected " + base);
-      // 心跳保活（20s）
-      heartbeatTimer && clearInterval(heartbeatTimer);
-      heartbeatTimer = setInterval(()=>{
-        if(wsSend && wsSend.readyState===1){
-          try { wsSend.send('{"ping":'+Date.now()+'}'); } catch(e){}
-        }
-      }, 20000);
-    };
-    wsSend.onerror = (e)=> stat($sendStat, "send: error");
-    wsSend.onclose = (ev)=> { stat($sendStat, "send: closed "+ev.code); heartbeatTimer && clearInterval(heartbeatTimer); };
-  } catch(e){ stat($sendStat, "send: create error"); }
+  wsSend=new WebSocket(base);
+  wsSend.onopen=()=>log("Send WS connected: "+base);
+  wsSend.onerror=(e)=>console.warn("Send WS error:",e);
+  wsSend.onclose=(e)=>console.warn("Send WS closed:",e.code,e.reason);
 
-  // 接收端：自动探测
-  chosenRecvPath = null;
-  recvAttemptIndex = 0;
-  framesCount = 0;
-  stat($framesStat, "frames: 0");
-  tryNextRecv(base);
-}
-
-function tryNextRecv(base){
-  if(chosenRecvPath !== null) return; // 已成功
-  if(recvAttemptIndex >= RECV_CANDIDATES.length){
-    stat($recvStat, "recv: all paths failed");
-    log("所有候选接收路径连接失败，请检查后端路由。");
-    return;
-  }
-  const path = RECV_CANDIDATES[recvAttemptIndex++];
-  const url = buildURL(base, path);
-  recvConnTries++;
-  stat($recvStat, `recv: connecting ${url} (try ${recvConnTries})`);
-
-  let gotMessage = false;
-  try {
-    wsRecv = new WebSocket(url);
-    wsRecv.onopen = ()=> {
-      stat($recvStat, `recv: open ${url}`);
-    };
-    wsRecv.onerror = ()=> {
-      stat($recvStat, `recv: error ${url}`);
-    };
-    wsRecv.onclose = (ev)=> {
-      if(!gotMessage && chosenRecvPath===null){
-        // 这个路径不对，换下一个
-        tryNextRecv(base);
-      }else{
-        stat($recvStat, `recv: closed ${url} (${ev.code})`);
+  // 如果你的后端没有 /sub，这里会 404；因此直接用 base
+  const recvURL = base; // 如确实有 /sub，请改成 base + "/sub"
+  wsRecv=new WebSocket(recvURL);
+  wsRecv.onopen=()=>console.log("Recv WS connected: "+recvURL);
+  wsRecv.onerror=(e)=>console.warn("Recv WS error:",e);
+  wsRecv.onclose=(e)=>console.warn("Recv WS closed:",e.code,e.reason);
+  wsRecv.onmessage=async ev=>{
+    try{
+      const data=JSON.parse(ev.data);
+      if(data.frame){
+        document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
+        const blob=await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
+        frameImageBitmap=await createImageBitmap(blob, { imageOrientation:'none' });
+        fitPanelToImage(frameImageBitmap); // ★ 收到帧后按比例放大面板
       }
-    };
-    wsRecv.onmessage = async (ev)=>{
-      gotMessage = true;
-      if(chosenRecvPath===null){
-        chosenRecvPath = path; // 锁定路径
-        stat($recvStat, `recv: ✅ using ${url}`);
-      }
-      try{
-        let data = null;
-        if(typeof ev.data === "string"){
-          data = JSON.parse(ev.data);
-        }else if(ev.data instanceof ArrayBuffer){
-          const txt = new TextDecoder().decode(new Uint8Array(ev.data));
-          data = JSON.parse(txt);
-        }
-        if(data && data.frame){
-          framesCount++;
-          stat($framesStat, "frames: " + framesCount);
-          document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
-          const blob=await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
-          frameImageBitmap=await createImageBitmap(blob, { imageOrientation:'none' });
-          fitPanelToImage(frameImageBitmap);
-        }
-      }catch(e){ console.warn("WS parse error:", e); }
-    };
-  } catch(e){
-    // 立即尝试下一个
-    tryNextRecv(base);
-  }
+    }catch(e){console.warn("WS parse error:",e);}
+  };
 }
 
 // ===== GL 初始化（3D）=====
@@ -290,14 +181,10 @@ function initGLResources(gl){
   gl.useProgram(program3D);
   const uTexLoc = gl.getUniformLocation(program3D, "u_texture");
   if (uTexLoc) gl.uniform1i(uTexLoc, 0);
-
-  // 保证双眼都可见（你之前的诉求）
-  gl.disable(gl.CULL_FACE);
-  gl.disable(gl.DEPTH_TEST);
 }
 
 async function startXR(){
-  setupSockets();  // ← 先连 WS（含自动探测）
+  setupSockets();
   if(!('xr' in navigator)){log("WebXR 不可用");return;}
   const ok=await navigator.xr.isSessionSupported('immersive-vr');
   if(!ok){log("immersive-vr 不受支持");return;}
@@ -327,8 +214,8 @@ async function startXR(){
       gl.viewport(vp.x, vp.y, vp.width, vp.height);
 
       const proj = view.projectionMatrix;
-      const viewMat = mat4Inverse(view.transform.matrix);
-      const viewProj = mat4Multiply(proj, viewMat);
+      const viewInv = view.transform.inverse.matrix;
+      const viewProj = mat4Multiply(proj, viewInv);
 
       let model = mat4Translate(0,0,-PANEL_DISTANCE);
       if (PANEL_RX_DEG !== 0){
@@ -382,7 +269,7 @@ async function startXR(){
       if(!gateTrack(handed,validCount>=MIN_JOINTS)) continue;
 
       const out={t:time,space:'viewer',hand:handed,joints};
-      if(wsSend&&wsSend.readyState===1) wsSend.send(JSON.stringify(out));
+      if(wsSend&&wsSend.readyState===1)wsSend.send(JSON.stringify(out));
     }
 
     session.requestAnimationFrame(onFrame);
