@@ -21,104 +21,140 @@
 
 <script>
 // ===== 手部追踪状态机参数 =====
-const MIN_JOINTS = 21;
-const GOOD_FRAMES_TO_LOCK = 3;
-const BAD_FRAMES_TO_LOSE  = 8;
-const TRACK = { left: {state:'LOST',good:0,bad:0}, right:{state:'LOST',good:0,bad:0} };
-
-function gateTrack(handedness, isGood) {
-  const st = TRACK[handedness] || (TRACK[handedness] = {state:'LOST',good:0,bad:0});
-  if (isGood) { st.good++; st.bad = 0; if (st.state === 'LOST' && st.good >= GOOD_FRAMES_TO_LOCK) st.state = 'TRACKED'; }
-  else        { st.bad++;  st.good= 0; if (st.state === 'TRACKED' && st.bad  >= BAD_FRAMES_TO_LOSE ) st.state = 'LOST'; }
-  return st.state === 'TRACKED';
+const MIN_JOINTS=21, GOOD_FRAMES_TO_LOCK=3, BAD_FRAMES_TO_LOSE=8;
+const TRACK={left:{state:'LOST',good:0,bad:0}, right:{state:'LOST',good:0,bad:0}};
+function gateTrack(h,good){
+  const st=TRACK[h]||(TRACK[h]={state:'LOST',good:0,bad:0});
+  if(good){st.good++;st.bad=0;if(st.state==='LOST'&&st.good>=GOOD_FRAMES_TO_LOCK)st.state='TRACKED';}
+  else {st.bad++;st.good=0;if(st.state==='TRACKED'&&st.bad>=BAD_FRAMES_TO_LOSE)st.state='LOST';}
+  return st.state==='TRACKED';
 }
+function transformPos(p){return{x:-p.z,y:-p.x,z:p.y};}
+function quatMul(a,b){return{x:a.w*b.x+a.x*b.w+a.y*b.z-a.z*b.y,
+                              y:a.w*b.y-a.x*b.z+a.y*b.w+a.z*b.x,
+                              z:a.w*b.z+a.x*b.y-a.y*b.x+a.z*b.w,
+                              w:a.w*b.w-a.x*b.x-a.y*b.y-a.z*b.z};}
+function quatConj(q){return{x:-q.x,y:-q.y,z:-q.z,w:q.w};}
+function quatNorm(q){const n=Math.hypot(q.x,q.y,q.z,q.w)||1;return{x:q.x/n,y:q.y/n,z:q.z/n,w:q.w/n};}
+const qR={x:-0.5,y:0.5,z:0.5,w:-0.5}, qR_inv=quatConj(qR);
+const JOINTS=["wrist","thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx-distal","thumb-tip",
+              "index-finger-metacarpal","index-finger-phalanx-proximal","index-finger-phalanx-intermediate","index-finger-phalanx-distal","index-finger-tip",
+              "middle-finger-metacarpal","middle-finger-phalanx-proximal","middle-finger-phalanx-intermediate","middle-finger-phalanx-distal","middle-finger-tip",
+              "ring-finger-metacarpal","ring-finger-phalanx-proximal","ring-finger-phalanx-intermediate","ring-finger-phalanx-distal","ring-finger-tip",
+              "pinky-finger-metacarpal","pinky-finger-phalanx-proximal","pinky-finger-phalanx-intermediate","pinky-finger-phalanx-distal","pinky-finger-tip"];
 
-function transformPos(p) { return { x: -p.z, y: -p.x, z: p.y }; }
-function quatMul(a, b) {
-  return { x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
-           y: a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
-           z: a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
-           w: a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z };
-}
-function quatConj(q){ return {x:-q.x, y:-q.y, z:-q.z, w:q.w}; }
-function quatNorm(q){
-  const n = Math.hypot(q.x, q.y, q.z, q.w) || 1;
-  return {x:q.x/n, y:q.y/n, z:q.z/n, w:q.w/n};
-}
-const qR = { x:-0.5, y: 0.5, z: 0.5, w:-0.5 };
-const qR_inv = quatConj(qR);
+let wsSend=null, wsRecv=null;
+let frameImageBitmap=null;
+let gl, texture, program, positionBuffer, texcoordBuffer;
 
-const JOINTS = [
-  "wrist","thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx-distal","thumb-tip",
-  "index-finger-metacarpal","index-finger-phalanx-proximal","index-finger-phalanx-intermediate","index-finger-phalanx-distal","index-finger-tip",
-  "middle-finger-metacarpal","middle-finger-phalanx-proximal","middle-finger-phalanx-intermediate","middle-finger-phalanx-distal","middle-finger-tip",
-  "ring-finger-metacarpal","ring-finger-phalanx-proximal","ring-finger-phalanx-intermediate","ring-finger-phalanx-distal","ring-finger-tip",
-  "pinky-finger-metacarpal","pinky-finger-phalanx-proximal","pinky-finger-phalanx-intermediate","pinky-finger-phalanx-distal","pinky-finger-tip",
-];
-
-let wsSend = null, wsRecv = null;
-function log(txt){ console.log(txt); const el=document.getElementById('log'); if(el) el.textContent=txt; }
+function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
 
 // ===== 建立两个 WebSocket：发送 + 接收 =====
 function setupSockets(){
-  const base = document.getElementById('ws').value;
-  wsSend = new WebSocket(base);             // root 用来发送手势
-  wsSend.onopen = ()=>log("Send WS connected: "+base);
-
-  wsRecv = new WebSocket(base + "/sub");    // /sub 用来接收仿真帧
-  wsRecv.onopen = ()=>console.log("Recv WS connected: "+base+"/sub");
-  wsRecv.onmessage = ev=>{
+  const base=document.getElementById('ws').value;
+  wsSend=new WebSocket(base);
+  wsSend.onopen=()=>log("Send WS connected: "+base);
+  wsRecv=new WebSocket(base+"/sub");
+  wsRecv.onopen=()=>console.log("Recv WS connected: "+base+"/sub");
+  wsRecv.onmessage=async ev=>{
     try{
-      const data = JSON.parse(ev.data);
+      const data=JSON.parse(ev.data);
       if(data.frame){
-        document.getElementById("sim").src = "data:image/jpeg;base64,"+data.frame;
+        document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
+        const blob=await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
+        frameImageBitmap=await createImageBitmap(blob);
       }
-    }catch(e){ console.warn("WS parse error:", e); }
+    }catch(e){console.warn("WS parse error:",e);}
   };
+}
+
+// ===== 初始化 WebGL Shader =====
+function initGLResources(gl){
+  const vs=`attribute vec2 a_position;attribute vec2 a_texcoord;
+  varying vec2 v_texcoord;void main(){gl_Position=vec4(a_position,0,1);v_texcoord=a_texcoord;}`;
+  const fs=`precision mediump float;varying vec2 v_texcoord;uniform sampler2D u_texture;
+  void main(){gl_FragColor=texture2D(u_texture,v_texcoord);}`;
+  function compile(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);return s;}
+  const vsObj=compile(gl.VERTEX_SHADER,vs), fsObj=compile(gl.FRAGMENT_SHADER,fs);
+  program=gl.createProgram();gl.attachShader(program,vsObj);gl.attachShader(program,fsObj);gl.linkProgram(program);
+
+  positionBuffer=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,positionBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
+
+  texcoordBuffer=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,texcoordBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,1,0,0,1,0,1,1,0,1,1]),gl.STATIC_DRAW);
+
+  texture=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,texture);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
 }
 
 async function startXR(){
   setupSockets();
-  if (!('xr' in navigator)) { log("WebXR 不可用（需 HTTPS/最新 Quest 浏览器）"); return; }
-  const ok = await navigator.xr.isSessionSupported('immersive-vr');
-  if (!ok) { log("immersive-vr 不受支持"); return; }
-
+  if(!('xr' in navigator)){log("WebXR 不可用");return;}
+  const ok=await navigator.xr.isSessionSupported('immersive-vr');
+  if(!ok){log("immersive-vr 不受支持");return;}
   let session;
   try{
-    session = await navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local-floor'],optionalFeatures:['hand-tracking']});
-  }catch(e){ log("requestSession 失败："+e); return; }
+    session=await navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local-floor'],optionalFeatures:['hand-tracking']});
+  }catch(e){log("requestSession 失败："+e);return;}
 
   const canvas=document.createElement('canvas');
-  const gl=canvas.getContext('webgl',{xrCompatible:true});
+  gl=canvas.getContext('webgl',{xrCompatible:true});
   await gl.makeXRCompatible();
-  session.updateRenderState({ baseLayer:new XRWebGLLayer(session,gl) });
+  session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+  initGLResources(gl);
 
   log("XR session started");
   const viewerSpace=await session.requestReferenceSpace('viewer');
 
   session.requestAnimationFrame(function onFrame(time,frame){
+    const baseLayer=session.renderState.baseLayer;
+    gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
+    gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+
+    if(frameImageBitmap){
+      gl.bindTexture(gl.TEXTURE_2D,texture);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frameImageBitmap);
+      gl.useProgram(program);
+      const posLoc=gl.getAttribLocation(program,"a_position");
+      const texLoc=gl.getAttribLocation(program,"a_texcoord");
+      gl.bindBuffer(gl.ARRAY_BUFFER,positionBuffer);
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc,2,gl.FLOAT,false,0,0);
+      gl.bindBuffer(gl.ARRAY_BUFFER,texcoordBuffer);
+      gl.enableVertexAttribArray(texLoc);
+      gl.vertexAttribPointer(texLoc,2,gl.FLOAT,false,0,0);
+      gl.drawArrays(gl.TRIANGLES,0,6);
+    }
+
     for(const source of session.inputSources){
-      if(!source.hand) continue;
+      if(!source.hand)continue;
       const handed=source.handedness;
-      const joints={}; let validCount=0;
+      const joints={};let validCount=0;
       for(const j of JOINTS){
-        const js=source.hand.get(j); if(!js) continue;
-        const pose=frame.getJointPose(js,viewerSpace); if(!pose||pose.radius==null) continue;
+        const js=source.hand.get(j);if(!js)continue;
+        const pose=frame.getJointPose(js,viewerSpace);if(!pose||pose.radius==null)continue;
         const P=transformPos(pose.transform.position);
         const q=pose.transform.orientation;
         const q2=quatNorm(quatMul(quatMul(qR,q),qR_inv));
         joints[j]={x:P.x,y:P.y,z:P.z,qx:q2.x,qy:q2.y,qz:q2.z,qw:q2.w,radius:pose.radius};
         validCount++;
       }
-      if(!gateTrack(handed,validCount>=MIN_JOINTS)) continue;
+      if(!gateTrack(handed,validCount>=MIN_JOINTS))continue;
       const out={t:time,space:'viewer',hand:handed,joints};
-      if(wsSend && wsSend.readyState===1) wsSend.send(JSON.stringify(out));
+      if(wsSend&&wsSend.readyState===1)wsSend.send(JSON.stringify(out));
     }
     session.requestAnimationFrame(onFrame);
   });
 }
 
-document.getElementById('enter').addEventListener('click', startXR);
+document.getElementById('enter').addEventListener('click',startXR);
 </script>
 </body>
 </html>
