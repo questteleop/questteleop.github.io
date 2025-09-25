@@ -13,7 +13,7 @@
   <h1>WebXR 手部关节采集 → WebSocket + 仿真画面显示</h1>
   <p>在 Quest 浏览器里打开本页，点击按钮进入 VR，并允许“手部追踪”。</p>
   <label>WSS 地址：
-    <input id="ws" style="width: min(600px, 80vw)" value="wss://shakia-novelistic-madly.ngrok-free.app">
+    <input id="ws" style="width: min(600px, 80vw)" value="wss://mournfully-fulvous-lashonda.ngrok-free.dev">
   </label>
   <div><button id="enter">进入 WebXR（手势）</button></div>
   <div id="log"></div>
@@ -119,20 +119,13 @@ function fitPanelToImage(img){
 
 function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
 
-// ===== WebSocket（改动：接收端不再固定 /sub）=====
+// ===== WebSocket（原样）=====
 function setupSockets(){
-  const base=document.getElementById('ws').value.trim();
+  const base=document.getElementById('ws').value;
   wsSend=new WebSocket(base);
   wsSend.onopen=()=>log("Send WS connected: "+base);
-  wsSend.onerror=(e)=>console.warn("Send WS error:",e);
-  wsSend.onclose=(e)=>console.warn("Send WS closed:",e.code,e.reason);
-
-  // 如果你的后端没有 /sub，这里会 404；因此直接用 base
-  const recvURL = base; // 如确实有 /sub，请改成 base + "/sub"
-  wsRecv=new WebSocket(recvURL);
-  wsRecv.onopen=()=>console.log("Recv WS connected: "+recvURL);
-  wsRecv.onerror=(e)=>console.warn("Recv WS error:",e);
-  wsRecv.onclose=(e)=>console.warn("Recv WS closed:",e.code,e.reason);
+  wsRecv=new WebSocket(base+"/sub");
+  wsRecv.onopen=()=>console.log("Recv WS connected: "+base+"/sub");
   wsRecv.onmessage=async ev=>{
     try{
       const data=JSON.parse(ev.data);
