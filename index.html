@@ -49,6 +49,38 @@ let gl, texture, program, positionBuffer, texcoordBuffer;
 
 function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
 
+// === 纹理坐标方向控制（为“我在上面看”修正默认旋转/翻转） ===
+let ORIENT = 270;   // 0/90/180/270；270 通常把“顶上观看”的画面转正
+let FLIP_X = false;
+let FLIP_Y = true;  // WebGL 与像素坐标 Y 轴相反，默认翻一次
+
+function makeTexcoords(orient, flipX, flipY){
+  // 两个三角形（全屏）— 顶点顺序与 a_position 匹配
+  let uv = [
+    0,0,  1,0,  0,1,
+    0,1,  1,0,  1,1
+  ];
+  function rot90(arr){
+    const out = new Float32Array(arr.length);
+    for(let i=0;i<arr.length;i+=2){ const u=arr[i], v=arr[i+1]; out[i]=v; out[i+1]=1-u; }
+    return Array.from(out);
+  }
+  let arr = uv;
+  if(orient===90)  arr = rot90(arr);
+  if(orient===180) arr = rot90(rot90(arr));
+  if(orient===270) arr = rot90(rot90(rot90(arr)));
+  for(let i=0;i<arr.length;i+=2){
+    if(flipX) arr[i]   = 1 - arr[i];
+    if(flipY) arr[i+1] = 1 - arr[i+1];
+  }
+  return new Float32Array(arr);
+}
+function applyTexcoords(){
+  const tc = makeTexcoords(ORIENT, FLIP_X, FLIP_Y);
+  gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, tc, gl.STATIC_DRAW);
+}
+
 // ===== 建立两个 WebSocket：发送 + 接收 =====
 function setupSockets(){
   const base=document.getElementById('ws').value;
@@ -62,7 +94,8 @@ function setupSockets(){
       if(data.frame){
         document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
         const blob=await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
-        frameImageBitmap=await createImageBitmap(blob);
+        // 禁用 EXIF 自动旋转，统一由纹理坐标控制方向
+        frameImageBitmap=await createImageBitmap(blob, { imageOrientation: 'none' });
       }
     }catch(e){console.warn("WS parse error:",e);}
   };
@@ -78,18 +111,20 @@ function initGLResources(gl){
   const vsObj=compile(gl.VERTEX_SHADER,vs), fsObj=compile(gl.FRAGMENT_SHADER,fs);
   program=gl.createProgram();gl.attachShader(program,vsObj);gl.attachShader(program,fsObj);gl.linkProgram(program);
 
-  // ★ 新增：绑定采样器到纹理单元 0，避免某些设备默认值非 0
   gl.useProgram(program);
   const uTexLoc = gl.getUniformLocation(program, "u_texture");
   if (uTexLoc) gl.uniform1i(uTexLoc, 0);
 
   positionBuffer=gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER,positionBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([
+    -1,-1,  1,-1,  -1, 1,
+    -1, 1,  1,-1,   1, 1
+  ]),gl.STATIC_DRAW);
 
   texcoordBuffer=gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER,texcoordBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,1,0,0,1,0,1,1,0,1,1]),gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, makeTexcoords(ORIENT, FLIP_X, FLIP_Y), gl.STATIC_DRAW);
 
   texture=gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D,texture);
@@ -120,22 +155,20 @@ async function startXR(){
 
   session.requestAnimationFrame(function onFrame(time,frame){
     const baseLayer=session.renderState.baseLayer;
-
-    // ★★ 关键修正：必须先拿 viewerPose，再对每个 view 设置 viewport
     const viewerPose = frame.getViewerPose(viewerSpace);
     if (!viewerPose) { session.requestAnimationFrame(onFrame); return; }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
 
     for (const view of viewerPose.views) {
-      const viewport = baseLayer.getViewport(view);   // ← 正确用法：传入 XRView
-      gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+      const vp = baseLayer.getViewport(view);
+      gl.viewport(vp.x, vp.y, vp.width, vp.height);
 
       if(frameImageBitmap){
         gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D,texture);
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); // 可选：如需翻转
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); // 方向交给 texcoord 处理
         gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frameImageBitmap);
 
         gl.useProgram(program);
@@ -149,7 +182,6 @@ async function startXR(){
         gl.vertexAttribPointer(texLoc,2,gl.FLOAT,false,0,0);
         gl.drawArrays(gl.TRIANGLES,0,6);
       } else {
-        // 没有帧时清一个可见颜色，确保 immersive 里能看到内容
         gl.clearColor(0.25,0,0,1);
         gl.clear(gl.COLOR_BUFFER_BIT);
       }
