@@ -60,6 +60,7 @@ function setupSockets(){
     try{
       const data=JSON.parse(ev.data);
       if(data.frame){
+        console.log("收到仿真帧, 长度:", data.frame.length);
         document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
         const blob=await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
         frameImageBitmap=await createImageBitmap(blob);
@@ -105,6 +106,10 @@ async function startXR(){
   }catch(e){log("requestSession 失败："+e);return;}
 
   const canvas=document.createElement('canvas');
+  document.body.appendChild(canvas); // ✅ 调试：插入到 DOM
+  canvas.style.width="640px";
+  canvas.style.height="480px";
+
   gl=canvas.getContext('webgl',{xrCompatible:true});
   await gl.makeXRCompatible();
   session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
@@ -114,6 +119,7 @@ async function startXR(){
   const viewerSpace=await session.requestReferenceSpace('viewer');
 
   session.requestAnimationFrame(function onFrame(time,frame){
+    console.log("Frame tick", time, !!frameImageBitmap); // ✅ 调试：确认循环在跑
     const baseLayer=session.renderState.baseLayer;
     gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
     gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
