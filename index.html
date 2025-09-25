@@ -13,6 +13,7 @@
   <h1>WebXR 手部关节采集 → WebSocket + 仿真画面显示</h1>
   <p>在 Quest 浏览器里打开本页，点击按钮进入 VR，并允许“手部追踪”。</p>
   <label>WSS 地址：
+    <!-- 用你当前 ngrok 输出的 https 域名改成 wss://；下面只是示例 -->
     <input id="ws" style="width: min(600px, 80vw)" value="wss://shakia-novelistic-madly.ngrok-free.dev">
   </label>
   <div><button id="enter">进入 WebXR（手势）</button></div>
@@ -47,10 +48,10 @@ let wsSend=null, wsRecv=null;
 let frameImageBitmap=null;
 
 // ===== 面板参数（更大更近） =====
-const PANEL_DISTANCE = 1.2;
-const PANEL_BASE_WIDTH = 2.2;
+const PANEL_DISTANCE = 1.2;   // 更近
+const PANEL_BASE_WIDTH = 2.2; // 基础宽度更大（米）
 let panelW = PANEL_BASE_WIDTH;
-let panelH = 1.3;
+let panelH = 1.3;             // 初始高度，收到帧后按比例自动更新
 const PANEL_RX_DEG   = 0;
 
 // 纹理方向（可按需改）
@@ -79,6 +80,29 @@ function mat4Translate(tx,ty,tz){
 function mat4RotateX(rad){
   const c=Math.cos(rad), s=Math.sin(rad);
   return new Float32Array([1,0,0,0,  0,c,s,0,  0,-s,c,0,  0,0,0,1]);
+}
+// 通用 4×4 逆矩阵（为双眼一致性准备）
+function mat4Inverse(m){
+  const a=new Float32Array(m), inv=new Float32Array(16);
+  inv[0]=a[5]*a[10]*a[15]-a[5]*a[11]*a[14]-a[9]*a[6]*a[15]+a[9]*a[7]*a[14]+a[13]*a[6]*a[11]-a[13]*a[7]*a[10];
+  inv[4]=-a[4]*a[10]*a[15]+a[4]*a[11]*a[14]+a[8]*a[6]*a[15]-a[8]*a[7]*a[14]-a[12]*a[6]*a[11]+a[12]*a[7]*a[10];
+  inv[8]=a[4]*a[9]*a[15]-a[4]*a[11]*a[13]-a[8]*a[5]*a[15]+a[8]*a[7]*a[13]+a[12]*a[5]*a[11]-a[12]*a[7]*a[9];
+  inv[12]=-a[4]*a[9]*a[14]+a[4]*a[10]*a[13]+a[8]*a[5]*a[14]-a[8]*a[6]*a[13]-a[12]*a[5]*a[10]+a[12]*a[6]*a[9];
+  inv[1]=-a[1]*a[10]*a[15]+a[1]*a[11]*a[14]+a[9]*a[2]*a[15]-a[9]*a[3]*a[14]-a[13]*a[2]*a[11]+a[13]*a[3]*a[10];
+  inv[5]=a[0]*a[10]*a[15]-a[0]*a[11]*a[14]-a[8]*a[2]*a[15]+a[8]*a[3]*a[14]+a[12]*a[2]*a[11]-a[12]*a[3]*a[10];
+  inv[9]=-a[0]*a[9]*a[15]+a[0]*a[11]*a[13]+a[8]*a[1]*a[15]-a[8]*a[3]*a[13]-a[12]*a[1]*a[11]+a[12]*a[3]*a[9];
+  inv[13]=a[0]*a[9]*a[14]-a[0]*a[10]*a[13]-a[8]*a[1]*a[14]+a[8]*a[2]*a[13]+a[12]*a[1]*a[10]-a[12]*a[2]*a[9];
+  inv[2]=a[1]*a[6]*a[15]-a[1]*a[7]*a[14]-a[5]*a[2]*a[15]+a[5]*a[3]*a[14]+a[13]*a[2]*a[7]-a[13]*a[3]*a[6];
+  inv[6]=-a[0]*a[6]*a[15]+a[0]*a[7]*a[14]+a[4]*a[2]*a[15]-a[4]*a[3]*a[14]-a[12]*a[2]*a[7]+a[12]*a[3]*a[6];
+  inv[10]=a[0]*a[5]*a[15]-a[0]*a[7]*a[13]-a[4]*a[1]*a[15]+a[4]*a[3]*a[13]+a[12]*a[1]*a[7]-a[12]*a[3]*a[5];
+  inv[14]=-a[0]*a[5]*a[14]+a[0]*a[6]*a[13]+a[4]*a[1]*a[14]-a[4]*a[2]*a[13]-a[12]*a[1]*a[6]+a[12]*a[2]*a[5];
+  inv[3]=-a[1]*a[6]*a[11]+a[1]*a[7]*a[10]+a[5]*a[2]*a[11]-a[5]*a[3]*a[10]-a[9]*a[2]*a[7]+a[9]*a[3]*a[6];
+  inv[7]=a[0]*a[6]*a[11]-a[0]*a[7]*a[10]-a[4]*a[2]*a[11]+a[4]*a[3]*a[10]+a[8]*a[2]*a[7]-a[8]*a[3]*a[6];
+  inv[11]=-a[0]*a[5]*a[11]+a[0]*a[7]*a[9]+a[4]*a[1]*a[11]-a[4]*a[3]*a[9]-a[8]*a[1]*a[7]+a[8]*a[3]*a[5];
+  inv[15]=a[0]*a[5]*a[10]-a[0]*a[6]*a[9]-a[4]*a[1]*a[10]+a[4]*a[2]*a[9]+a[8]*a[1]*a[6]-a[8]*a[2]*a[5];
+  let det=a[0]*inv[0]+a[1]*inv[4]+a[2]*inv[8]+a[3]*inv[12];
+  if(det===0) return mat4Identity();
+  det=1.0/det; for(let i=0;i<16;i++) inv[i]*=det; return inv;
 }
 
 // ===== 顶点/UV数据 =====
@@ -111,65 +135,32 @@ function applyTexcoords(){
 // ===== 根据图片尺寸自动放大面板 =====
 function fitPanelToImage(img){
   if(!img || !img.width || !img.height) return;
-  const aspect = img.width / img.height;
+  const aspect = img.width / img.height; // w/h
   panelW = PANEL_BASE_WIDTH;
-  panelH = panelW / aspect;
+  panelH = panelW / aspect;   // 等比例放大
   uploadPanelVertices();
 }
 
 function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
 
-// ===== WebSocket：仅这里做了可配置路径的最小改动 =====
-const SEND_PATH = "";   // 发送端路径（原来连根路径就行）
-const RECV_PATH = "";   // 接收端路径：如果你的后端没有 /sub，就留空；若有就写 "/sub"
-// 例：若后端是 /ws 和 /ws/sub，则写：const SEND_PATH="/ws"; const RECV_PATH="/ws/sub";
-
-function joinWs(base, path){
-  if(!path) return base;
-  // 避免双斜杠
-  if(base.endsWith("/")) base = base.slice(0, -1);
-  return base + path;
-}
-
+// ===== WebSocket（修改点：接收端不再追加 /sub）=====
 function setupSockets(){
-  const base=document.getElementById('ws').value.trim();
-  if(!base.startsWith("ws://") && !base.startsWith("wss://")){
-    log("WSS 地址必须以 ws:// 或 wss:// 开头"); return;
-  }
-  const sendURL = joinWs(base, SEND_PATH);
-  const recvURL = joinWs(base, RECV_PATH);
-
-  try {
-    wsSend=new WebSocket(sendURL);
-    wsSend.onopen=()=>log("Send WS connected: "+sendURL);
-    wsSend.onerror=(e)=>console.warn("Send WS error:", e);
-    wsSend.onclose=(ev)=>console.warn("Send WS closed:", ev.code, ev.reason);
-  } catch(e){ console.error("Send WS create error:", e); }
-
-  try {
-    wsRecv=new WebSocket(recvURL);
-    wsRecv.onopen =()=>console.log("Recv WS connected: "+recvURL);
-    wsRecv.onerror=(e)=>console.warn("Recv WS error:", e);
-    wsRecv.onclose=(ev)=>console.warn("Recv WS closed:", ev.code, ev.reason);
-    wsRecv.onmessage=async ev=>{
-      try{
-        // 兼容二进制/文本
-        let dataObj=null;
-        if(typeof ev.data==="string"){
-          dataObj=JSON.parse(ev.data);
-        }else if(ev.data instanceof ArrayBuffer){
-          const txt=new TextDecoder().decode(new Uint8Array(ev.data));
-          dataObj=JSON.parse(txt);
-        }
-        if(dataObj && dataObj.frame){
-          document.getElementById("sim").src="data:image/jpeg;base64,"+dataObj.frame;
-          const blob=await fetch("data:image/jpeg;base64,"+dataObj.frame).then(r=>r.blob());
-          frameImageBitmap=await createImageBitmap(blob, { imageOrientation:'none' });
-          fitPanelToImage(frameImageBitmap);
-        }
-      }catch(e){console.warn("WS parse error:",e);}
-    };
-  } catch(e){ console.error("Recv WS create error:", e); }
+  const base=document.getElementById('ws').value;
+  wsSend=new WebSocket(base);        // 发送：base
+  wsSend.onopen=()=>log("Send WS connected: "+base);
+  wsRecv=new WebSocket(base);        // 接收：也用 base（避免 404）
+  wsRecv.onopen=()=>console.log("Recv WS connected: "+base);
+  wsRecv.onmessage=async ev=>{
+    try{
+      const data=JSON.parse(ev.data);
+      if(data.frame){
+        document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
+        const blob=await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
+        frameImageBitmap=await createImageBitmap(blob, { imageOrientation:'none' });
+        fitPanelToImage(frameImageBitmap);
+      }
+    }catch(e){console.warn("WS parse error:",e);}
+  };
 }
 
 // ===== GL 初始化（3D）=====
@@ -207,6 +198,10 @@ function initGLResources(gl){
   gl.useProgram(program3D);
   const uTexLoc = gl.getUniformLocation(program3D, "u_texture");
   if (uTexLoc) gl.uniform1i(uTexLoc, 0);
+
+  // 保持双眼可见（可选）
+  gl.disable(gl.CULL_FACE);
+  gl.disable(gl.DEPTH_TEST);
 }
 
 async function startXR(){
@@ -240,8 +235,9 @@ async function startXR(){
       gl.viewport(vp.x, vp.y, vp.width, vp.height);
 
       const proj = view.projectionMatrix;
-      const viewInv = view.transform.inverse.matrix;
-      const viewProj = mat4Multiply(proj, viewInv);
+      // 使用我们自己的逆矩阵计算视图矩阵，确保双眼一致
+      const viewMat = mat4Inverse(view.transform.matrix);
+      const viewProj = mat4Multiply(proj, viewMat);
 
       let model = mat4Translate(0,0,-PANEL_DISTANCE);
       if (PANEL_RX_DEG !== 0){
