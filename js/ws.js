@@ -1,44 +1,25 @@
-import { uiLog } from './config.js';
+// ===== WebSocket（原样）=====
+export let wsSend=null, wsRecv=null;
+export let frameImageBitmap=null;
 
-// WebSocket 发送/接收与帧回调
-let wsSend = null, wsRecv = null;
-
-// 外部可设置的“接收帧回调”
-let onBitmap = null;
-export function setOnBitmapCallback(fn){ onBitmap = fn; }
+import { log } from './config.js';
 
 export function setupSockets(){
-  const base = document.getElementById('ws').value.trim();
+  const base=document.getElementById('ws').value;
+  wsSend=new WebSocket(base);
+  wsSend.onopen=()=>log("Send WS connected: "+base);
 
-  wsSend = new WebSocket(base);
-  wsSend.onopen = ()=> uiLog("Send WS connected: " + base);
-  wsSend.onerror= (e)=> console.warn("Send WS error:", e);
-  wsSend.onclose= (e)=> console.warn("Send WS closed:", e.code, e.reason);
-
-  wsRecv = new WebSocket(base + "/sub");
-  wsRecv.onopen = ()=> console.log("Recv WS connected: " + base + "/sub");
-  wsRecv.onerror= (e)=> console.warn("Recv WS error:", e);
-  wsRecv.onclose= (e)=> console.warn("Recv WS closed:", e.code, e.reason);
-  wsRecv.onmessage = async ev => {
+  wsRecv=new WebSocket(base+"/sub");
+  wsRecv.onopen=()=>console.log("Recv WS connected: "+base+"/sub");
+  wsRecv.onmessage=async ev=>{
     try{
-      const data = JSON.parse(ev.data);
-      if (data.frame){
-        // 页面里同步显示一份（便于调试）
-        const imgEl = document.getElementById("sim");
-        if (imgEl) imgEl.src="data:image/jpeg;base64,"+data.frame;
-
-        // 转为 ImageBitmap，禁用 EXIF 自动旋转
-        const blob = await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
-        const bmp  = await createImageBitmap(blob, { imageOrientation:'none' });
-
-        if (typeof onBitmap === 'function') onBitmap(bmp);
+      const data=JSON.parse(ev.data);
+      if(data.frame){
+        document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
+        const blob=await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
+        // 禁用 EXIF 自动旋转；方向全部交给 UV 控制
+        frameImageBitmap=await createImageBitmap(blob, { imageOrientation:'none' });
       }
-    }catch(e){ console.warn("WS parse error:", e); }
+    }catch(e){console.warn("WS parse error:",e);}
   };
-}
-
-export function trySendJSON(obj){
-  if (wsSend && wsSend.readyState === 1){
-    wsSend.send(JSON.stringify(obj));
-  }
 }

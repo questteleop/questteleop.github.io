@@ -1,8 +1,6 @@
-// ===== 矩阵与角度工具（原样） =====
-export function deg2rad(d){ return d*Math.PI/180; }
-export function mat4Identity(){
-  return new Float32Array([1,0,0,0,  0,1,0,0,  0,0,1,0,  0,0,0,1]);
-}
+// ====== 小工具：矩阵 ======
+export function deg2rad(d){return d*Math.PI/180;}
+export function mat4Identity(){return new Float32Array([1,0,0,0,  0,1,0,0,  0,0,1,0,  0,0,0,1]);}
 export function mat4Multiply(a,b){
   const out=new Float32Array(16);
   for(let r=0;r<4;r++){
