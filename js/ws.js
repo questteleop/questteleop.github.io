@@ -29,6 +29,3 @@ export function setupSockets(){
     }
   };
 }
-
-// （可选，但有助于某些构建/缓存环境识别导出）
-export { wsSend, wsRecv, frameImageBitmap, setupSockets };
