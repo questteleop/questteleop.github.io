@@ -20,7 +20,6 @@
   <img id="sim" alt="仿真画面将在这里显示">
 
 <script>
-// ===== 手部追踪状态机参数 =====
 const MIN_JOINTS=21, GOOD_FRAMES_TO_LOCK=3, BAD_FRAMES_TO_LOSE=8;
 const TRACK={left:{state:'LOST',good:0,bad:0}, right:{state:'LOST',good:0,bad:0}};
 function gateTrack(h,good){
@@ -49,7 +48,6 @@ let gl, texture, program, positionBuffer, texcoordBuffer;
 
 function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
 
-// ===== 建立两个 WebSocket：发送 + 接收 =====
 function setupSockets(){
   const base=document.getElementById('ws').value;
   wsSend=new WebSocket(base);
@@ -60,7 +58,6 @@ function setupSockets(){
     try{
       const data=JSON.parse(ev.data);
       if(data.frame){
-        console.log("收到仿真帧, 长度:", data.frame.length);
         document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
         const blob=await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
         frameImageBitmap=await createImageBitmap(blob);
@@ -69,7 +66,6 @@ function setupSockets(){
   };
 }
 
-// ===== 初始化 WebGL Shader =====
 function initGLResources(gl){
   const vs=`attribute vec2 a_position;attribute vec2 a_texcoord;
   varying vec2 v_texcoord;void main(){gl_Position=vec4(a_position,0,1);v_texcoord=a_texcoord;}`;
@@ -106,25 +102,27 @@ async function startXR(){
   }catch(e){log("requestSession 失败："+e);return;}
 
   const canvas=document.createElement('canvas');
-  document.body.appendChild(canvas); // ✅ 调试：插入到 DOM
-  canvas.style.width="640px";
-  canvas.style.height="480px";
+  document.body.appendChild(canvas);
+  canvas.width=1024;
+  canvas.height=1024;
 
   gl=canvas.getContext('webgl',{xrCompatible:true});
   await gl.makeXRCompatible();
-  session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+  session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl,{antialias:true,alpha:false})});
   initGLResources(gl);
 
   log("XR session started");
   const viewerSpace=await session.requestReferenceSpace('viewer');
 
   session.requestAnimationFrame(function onFrame(time,frame){
-    console.log("Frame tick", time, !!frameImageBitmap); // ✅ 调试：确认循环在跑
     const baseLayer=session.renderState.baseLayer;
+    const viewport=baseLayer.getViewport(frame.session.renderState.baseLayer);
     gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
-    gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.viewport(viewport.x,viewport.y,viewport.width,viewport.height);
 
     if(frameImageBitmap){
+      gl.clearColor(0,0,0,1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
       gl.bindTexture(gl.TEXTURE_2D,texture);
       gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frameImageBitmap);
       gl.useProgram(program);
@@ -137,6 +135,10 @@ async function startXR(){
       gl.enableVertexAttribArray(texLoc);
       gl.vertexAttribPointer(texLoc,2,gl.FLOAT,false,0,0);
       gl.drawArrays(gl.TRIANGLES,0,6);
+    } else {
+      // fallback: show red background so immersive mode not totally black
+      gl.clearColor(Math.sin(time/500)*0.5+0.5,0,0,1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
     }
 
     for(const source of session.inputSources){
