@@ -80,10 +80,9 @@ function mat4RotateX(rad){
   const c=Math.cos(rad), s=Math.sin(rad);
   return new Float32Array([1,0,0,0,  0,c,s,0,  0,-s,c,0,  0,0,0,1]);
 }
-// ★ 新增：通用 4×4 逆矩阵
+// 通用 4×4 逆矩阵（为双眼一致性准备）
 function mat4Inverse(m){
-  const a=new Float32Array(m);
-  const inv=new Float32Array(16);
+  const a=new Float32Array(m), inv=new Float32Array(16);
   inv[0]=a[5]*a[10]*a[15]-a[5]*a[11]*a[14]-a[9]*a[6]*a[15]+a[9]*a[7]*a[14]+a[13]*a[6]*a[11]-a[13]*a[7]*a[10];
   inv[4]=-a[4]*a[10]*a[15]+a[4]*a[11]*a[14]+a[8]*a[6]*a[15]-a[8]*a[7]*a[14]-a[12]*a[6]*a[11]+a[12]*a[7]*a[10];
   inv[8]=a[4]*a[9]*a[15]-a[4]*a[11]*a[13]-a[8]*a[5]*a[15]+a[8]*a[7]*a[13]+a[12]*a[5]*a[11]-a[12]*a[7]*a[9];
@@ -102,9 +101,7 @@ function mat4Inverse(m){
   inv[15]=a[0]*a[5]*a[10]-a[0]*a[6]*a[9]-a[4]*a[1]*a[10]+a[4]*a[2]*a[9]+a[8]*a[1]*a[6]-a[8]*a[2]*a[5];
   let det=a[0]*inv[0]+a[1]*inv[4]+a[2]*inv[8]+a[3]*inv[12];
   if(det===0) return mat4Identity();
-  det=1.0/det;
-  for(let i=0;i<16;i++) inv[i]*=det;
-  return inv;
+  det=1.0/det; for(let i=0;i<16;i++) inv[i]*=det; return inv;
 }
 
 // ===== 顶点/UV数据 =====
@@ -201,7 +198,7 @@ function initGLResources(gl){
   const uTexLoc = gl.getUniformLocation(program3D, "u_texture");
   if (uTexLoc) gl.uniform1i(uTexLoc, 0);
 
-  // ★ 新增：为避免“单眼黑屏”，关闭背面剔除与深度测试
+  // 关闭背面剔除和深度测试，避免单眼被剔除/遮挡
   gl.disable(gl.CULL_FACE);
   gl.disable(gl.DEPTH_TEST);
 }
@@ -237,7 +234,7 @@ async function startXR(){
       gl.viewport(vp.x, vp.y, vp.width, vp.height);
 
       const proj = view.projectionMatrix;
-      // ★ 改成我们自己的逆矩阵：保证双眼一致
+      // 使用我们自己的逆矩阵计算视图矩阵，确保双眼一致
       const viewMat = mat4Inverse(view.transform.matrix);
       const viewProj = mat4Multiply(proj, viewMat);
 
