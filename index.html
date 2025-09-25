@@ -11,17 +11,17 @@
 </style>
 <body>
   <h1>WebXR 手部关节采集 → WebSocket + 仿真画面显示</h1>
-  <p>在 Quest 浏览器里打开本页，点击下方按钮进入 VR，并允许“手部追踪”。</p>
+  <p>在 Quest 浏览器里打开本页，点击按钮进入 VR，并允许“手部追踪”。</p>
   <label>WSS 地址：
-    <input id="ws" style="width: min(600px, 80vw)" value="wss://mournfully-fulvous-lashonda.ngrok-free.dev/sub">
+    <input id="ws" style="width: min(600px, 80vw)" value="wss://mournfully-fulvous-lashonda.ngrok-free.dev">
   </label>
   <div><button id="enter">进入 WebXR（手势）</button></div>
   <div id="log"></div>
   <img id="sim" alt="仿真画面将在这里显示">
 
 <script>
-// === 保持原始手部追踪代码不变 ===
-const MIN_JOINTS = 21;         
+// ===== 手部追踪状态机参数 =====
+const MIN_JOINTS = 21;
 const GOOD_FRAMES_TO_LOCK = 3;
 const BAD_FRAMES_TO_LOSE  = 8;
 const TRACK = { left: {state:'LOST',good:0,bad:0}, right:{state:'LOST',good:0,bad:0} };
@@ -35,12 +35,10 @@ function gateTrack(handedness, isGood) {
 
 function transformPos(p) { return { x: -p.z, y: -p.x, z: p.y }; }
 function quatMul(a, b) {
-  return {
-    x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
-    y: a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
-    z: a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
-    w: a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
-  };
+  return { x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+           y: a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+           z: a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+           w: a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z };
 }
 function quatConj(q){ return {x:-q.x, y:-q.y, z:-q.z, w:q.w}; }
 function quatNorm(q){
@@ -58,69 +56,63 @@ const JOINTS = [
   "pinky-finger-metacarpal","pinky-finger-phalanx-proximal","pinky-finger-phalanx-intermediate","pinky-finger-phalanx-distal","pinky-finger-tip",
 ];
 
-let socket = null;
-function log(txt){ console.log(txt); const el = document.getElementById('log'); if(el) el.textContent = txt; }
+let wsSend = null, wsRecv = null;
+function log(txt){ console.log(txt); const el=document.getElementById('log'); if(el) el.textContent=txt; }
 
-// === 新增：WebSocket 订阅接收图像帧 ===
-function connectWS(){
-  const url = document.getElementById('ws').value;
-  socket = new WebSocket(url);
-  socket.onopen = ()=>log("WS connected to "+url);
-  socket.onmessage = (ev)=>{
+// ===== 建立两个 WebSocket：发送 + 接收 =====
+function setupSockets(){
+  const base = document.getElementById('ws').value;
+  wsSend = new WebSocket(base);             // root 用来发送手势
+  wsSend.onopen = ()=>log("Send WS connected: "+base);
+
+  wsRecv = new WebSocket(base + "/sub");    // /sub 用来接收仿真帧
+  wsRecv.onopen = ()=>console.log("Recv WS connected: "+base+"/sub");
+  wsRecv.onmessage = ev=>{
     try{
       const data = JSON.parse(ev.data);
       if(data.frame){
-        console.log("[browser] got frame, len=", data.frame.length);
-        document.getElementById("sim").src = "data:image/jpeg;base64," + data.frame;
+        document.getElementById("sim").src = "data:image/jpeg;base64,"+data.frame;
       }
     }catch(e){ console.warn("WS parse error:", e); }
   };
 }
 
 async function startXR(){
-  connectWS(); // 保持原始逻辑 + 加入订阅
+  setupSockets();
   if (!('xr' in navigator)) { log("WebXR 不可用（需 HTTPS/最新 Quest 浏览器）"); return; }
   const ok = await navigator.xr.isSessionSupported('immersive-vr');
   if (!ok) { log("immersive-vr 不受支持"); return; }
 
   let session;
   try{
-    session = await navigator.xr.requestSession('immersive-vr', {
-      requiredFeatures: ['local-floor'],
-      optionalFeatures: ['hand-tracking']
-    });
-  }catch(e){
-    log("requestSession 失败：" + e); return;
-  }
+    session = await navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local-floor'],optionalFeatures:['hand-tracking']});
+  }catch(e){ log("requestSession 失败："+e); return; }
 
-  const canvas = document.createElement('canvas');
-  const gl = canvas.getContext('webgl',{xrCompatible:true, alpha:false});
+  const canvas=document.createElement('canvas');
+  const gl=canvas.getContext('webgl',{xrCompatible:true});
   await gl.makeXRCompatible();
-  session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+  session.updateRenderState({ baseLayer:new XRWebGLLayer(session,gl) });
 
-  log('XR session started');
-  const viewerSpace = await session.requestReferenceSpace('viewer');
+  log("XR session started");
+  const viewerSpace=await session.requestReferenceSpace('viewer');
 
-  session.requestAnimationFrame(function onFrame(time, frame){
-    for (const source of session.inputSources) {
-      if (!source.hand) continue;
-      const handed = source.handedness;
-      const joints = {};
-      let validCount = 0;
-      for (const j of JOINTS) {
-        const js = source.hand.get(j); if (!js) continue;
-        const pose = frame.getJointPose(js, viewerSpace); if (!pose) continue;
-        if (pose.radius == null) continue;
-        const P = transformPos(pose.transform.position);
-        const q = pose.transform.orientation;
-        const q2 = quatNorm(quatMul(quatMul(qR, q), qR_inv));
-        joints[j] = { x: P.x, y: P.y, z: P.z, qx: q2.x, qy: q2.y, qz: q2.z, qw: q2.w, radius: pose.radius };
+  session.requestAnimationFrame(function onFrame(time,frame){
+    for(const source of session.inputSources){
+      if(!source.hand) continue;
+      const handed=source.handedness;
+      const joints={}; let validCount=0;
+      for(const j of JOINTS){
+        const js=source.hand.get(j); if(!js) continue;
+        const pose=frame.getJointPose(js,viewerSpace); if(!pose||pose.radius==null) continue;
+        const P=transformPos(pose.transform.position);
+        const q=pose.transform.orientation;
+        const q2=quatNorm(quatMul(quatMul(qR,q),qR_inv));
+        joints[j]={x:P.x,y:P.y,z:P.z,qx:q2.x,qy:q2.y,qz:q2.z,qw:q2.w,radius:pose.radius};
         validCount++;
       }
-      const isGood = validCount >= MIN_JOINTS;
-      if (!gateTrack(handed, isGood)) continue;
-      const out = { t: time, space: 'viewer', hand: handed, joints };
-      if (socket && socket.readyState === 1) socket.send(JSON.stringify(out));
+      if(!gateTrack(handed,validCount>=MIN_JOINTS)) continue;
+      const out={t:time,space:'viewer',hand:handed,joints};
+      if(wsSend && wsSend.readyState===1) wsSend.send(JSON.stringify(out));
     }
     session.requestAnimationFrame(onFrame);
   });
