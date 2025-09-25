@@ -2,7 +2,7 @@
 <html lang="zh">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WebXR Hand → Python Stream + 仿真画面显示</title>
+<title>WebXR Hand → Python Stream + 仿真显示</title>
 <style>
   body { font-family: system-ui, sans-serif; padding: 24px; background: #111; color: #eee;}
   button { font-size: 16px; padding: 10px 16px; }
@@ -20,6 +20,7 @@
   <img id="sim" alt="仿真画面将在这里显示">
 
 <script>
+// ===== 手部追踪状态机参数 =====
 const MIN_JOINTS=21, GOOD_FRAMES_TO_LOCK=3, BAD_FRAMES_TO_LOSE=8;
 const TRACK={left:{state:'LOST',good:0,bad:0}, right:{state:'LOST',good:0,bad:0}};
 function gateTrack(h,good){
@@ -44,9 +45,11 @@ const JOINTS=["wrist","thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx
 
 let wsSend=null, wsRecv=null;
 let frameImageBitmap=null;
+let gl, texture, program, positionBuffer, texcoordBuffer;
 
 function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
 
+// ===== 建立两个 WebSocket：发送 + 接收 =====
 function setupSockets(){
   const base=document.getElementById('ws').value;
   wsSend=new WebSocket(base);
@@ -65,6 +68,37 @@ function setupSockets(){
   };
 }
 
+// ===== 初始化 WebGL Shader =====
+function initGLResources(gl){
+  const vs=`attribute vec2 a_position;attribute vec2 a_texcoord;
+  varying vec2 v_texcoord;void main(){gl_Position=vec4(a_position,0,1);v_texcoord=a_texcoord;}`;
+  const fs=`precision mediump float;varying vec2 v_texcoord;uniform sampler2D u_texture;
+  void main(){gl_FragColor=texture2D(u_texture,v_texcoord);}`;
+  function compile(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);return s;}
+  const vsObj=compile(gl.VERTEX_SHADER,vs), fsObj=compile(gl.FRAGMENT_SHADER,fs);
+  program=gl.createProgram();gl.attachShader(program,vsObj);gl.attachShader(program,fsObj);gl.linkProgram(program);
+
+  // ★ 新增：绑定采样器到纹理单元 0，避免某些设备默认值非 0
+  gl.useProgram(program);
+  const uTexLoc = gl.getUniformLocation(program, "u_texture");
+  if (uTexLoc) gl.uniform1i(uTexLoc, 0);
+
+  positionBuffer=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,positionBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
+
+  texcoordBuffer=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,texcoordBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,1,0,0,1,0,1,1,0,1,1]),gl.STATIC_DRAW);
+
+  texture=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,texture);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+}
+
 async function startXR(){
   setupSockets();
   if(!('xr' in navigator)){log("WebXR 不可用");return;}
@@ -75,32 +109,53 @@ async function startXR(){
     session=await navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local-floor'],optionalFeatures:['hand-tracking']});
   }catch(e){log("requestSession 失败："+e);return;}
 
-  // 使用 Canvas 2D 绘制图像
   const canvas=document.createElement('canvas');
-  canvas.width = 1024;
-  canvas.height = 1024;
-  const ctx = canvas.getContext('2d');
-  const gl = canvas.getContext('webgl', {xrCompatible:true});
+  gl=canvas.getContext('webgl',{xrCompatible:true});
   await gl.makeXRCompatible();
   session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
+  initGLResources(gl);
 
   log("XR session started");
   const viewerSpace=await session.requestReferenceSpace('viewer');
 
   session.requestAnimationFrame(function onFrame(time,frame){
     const baseLayer=session.renderState.baseLayer;
-    const viewport=baseLayer.getViewport(frame.session.renderState.baseLayer);
-    gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
-    gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
 
-    // 每帧用 2D Canvas 绘制图像
-    ctx.fillStyle = frameImageBitmap ? "black" : "darkred";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    if(frameImageBitmap){
-      ctx.drawImage(frameImageBitmap, 0, 0, canvas.width, canvas.height);
+    // ★★ 关键修正：必须先拿 viewerPose，再对每个 view 设置 viewport
+    const viewerPose = frame.getViewerPose(viewerSpace);
+    if (!viewerPose) { session.requestAnimationFrame(onFrame); return; }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
+
+    for (const view of viewerPose.views) {
+      const viewport = baseLayer.getViewport(view);   // ← 正确用法：传入 XRView
+      gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+
+      if(frameImageBitmap){
+        gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D,texture);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); // 可选：如需翻转
+        gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frameImageBitmap);
+
+        gl.useProgram(program);
+        const posLoc=gl.getAttribLocation(program,"a_position");
+        const texLoc=gl.getAttribLocation(program,"a_texcoord");
+        gl.bindBuffer(gl.ARRAY_BUFFER,positionBuffer);
+        gl.enableVertexAttribArray(posLoc);
+        gl.vertexAttribPointer(posLoc,2,gl.FLOAT,false,0,0);
+        gl.bindBuffer(gl.ARRAY_BUFFER,texcoordBuffer);
+        gl.enableVertexAttribArray(texLoc);
+        gl.vertexAttribPointer(texLoc,2,gl.FLOAT,false,0,0);
+        gl.drawArrays(gl.TRIANGLES,0,6);
+      } else {
+        // 没有帧时清一个可见颜色，确保 immersive 里能看到内容
+        gl.clearColor(0.25,0,0,1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
     }
 
-    // 手部追踪数据发送
+    // === 手部数据采集 + 发送（原样） ===
     for(const source of session.inputSources){
       if(!source.hand) continue;
       const handed=source.handedness;
@@ -118,10 +173,7 @@ async function startXR(){
       if(!gateTrack(handed,validCount>=MIN_JOINTS)) continue;
 
       const out={t:time,space:'viewer',hand:handed,joints};
-      if(wsSend && wsSend.readyState===1){
-        wsSend.send(JSON.stringify(out));
-        console.debug("[WS] Sent", handed, validCount, "joints");
-      }
+      if(wsSend&&wsSend.readyState===1)wsSend.send(JSON.stringify(out));
     }
 
     session.requestAnimationFrame(onFrame);
