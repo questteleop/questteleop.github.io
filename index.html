@@ -2,7 +2,7 @@
 <html lang="zh">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>WebXR Hand → Python Stream + 仿真显示</title>
+<title>WebXR Hand → Python Stream + 仿真画面显示</title>
 <style>
   body { font-family: system-ui, sans-serif; padding: 24px; background: #111; color: #eee;}
   button { font-size: 16px; padding: 10px 16px; }
@@ -112,12 +112,15 @@ async function startXR(){
 
   session.requestAnimationFrame(function onFrame(time,frame){
     const baseLayer=session.renderState.baseLayer;
-    gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
-    gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+    const viewport=baseLayer.getViewport(frame.session.renderState.baseLayer);
+    gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
 
+    gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
     if(frameImageBitmap){
+      gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
       gl.bindTexture(gl.TEXTURE_2D,texture);
       gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frameImageBitmap);
+      gl.generateMipmap(gl.TEXTURE_2D);
       gl.useProgram(program);
       const posLoc=gl.getAttribLocation(program,"a_position");
       const texLoc=gl.getAttribLocation(program,"a_texcoord");
@@ -128,9 +131,12 @@ async function startXR(){
       gl.enableVertexAttribArray(texLoc);
       gl.vertexAttribPointer(texLoc,2,gl.FLOAT,false,0,0);
       gl.drawArrays(gl.TRIANGLES,0,6);
+    } else {
+      // 显示一个红色背景，避免全黑看不到任何东西
+      gl.clearColor(0.3,0,0,1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
     }
 
-    // === 手部数据采集 + 发送 ===
     for(const source of session.inputSources){
       if(!source.hand) continue;
       const handed=source.handedness;
@@ -150,7 +156,7 @@ async function startXR(){
       const out={t:time,space:'viewer',hand:handed,joints};
       if(wsSend && wsSend.readyState===1){
         wsSend.send(JSON.stringify(out));
-        console.debug("Sent", handed, validCount, "joints"); // ✅ 调试输出
+        console.debug("[WS] Sent", handed, validCount, "joints");
       }
     }
 
