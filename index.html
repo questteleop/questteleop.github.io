@@ -20,7 +20,7 @@
   <img id="sim" alt="仿真画面将在这里显示">
 
 <script>
-// ===== 手部追踪状态机参数（原样） =====
+// ===== 手部追踪（原样） =====
 const MIN_JOINTS=21, GOOD_FRAMES_TO_LOCK=3, BAD_FRAMES_TO_LOSE=8;
 const TRACK={left:{state:'LOST',good:0,bad:0}, right:{state:'LOST',good:0,bad:0}};
 function gateTrack(h,good){
@@ -46,21 +46,22 @@ const JOINTS=["wrist","thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx
 let wsSend=null, wsRecv=null;
 let frameImageBitmap=null;
 
-// ===== 显示屏参数（在你眼前的“看板”）=====
-const PANEL_DISTANCE = 1.8;     // 到头部的距离（米）
-const PANEL_WIDTH    = 1.4;     // 面板宽度（米）
-const PANEL_HEIGHT   = 0.9;     // 面板高度（米）
-const PANEL_RX_DEG   = 0;       // 如需微调：围绕X轴旋转（度），>0 往下仰
+// ===== 面板参数（更大更近） =====
+const PANEL_DISTANCE = 1.2;   // 更近
+const PANEL_BASE_WIDTH = 2.2; // 基础宽度更大（米）
+let panelW = PANEL_BASE_WIDTH;
+let panelH = 1.3;             // 初始高度，收到帧后按比例自动更新
+const PANEL_RX_DEG   = 0;
 
-// === 纹理坐标方向控制（如仍需修正图像上下/左右/旋转） ===
+// 纹理方向（可按需改）
 let ORIENT = 0;     // 0/90/180/270
 let FLIP_X = false;
-let FLIP_Y = true;  // 大多数情况下需要Y翻转
+let FLIP_Y = true;
 
-// ===== WebGL 变量 =====
+// ===== WebGL =====
 let gl, texture, program3D, pos3DBuffer, uvBuffer;
 
-// ====== 小工具：矩阵 ======
+// ===== 矩阵工具 =====
 function deg2rad(d){return d*Math.PI/180;}
 function mat4Identity(){return new Float32Array([1,0,0,0,  0,1,0,0,  0,0,1,0,  0,0,0,1]);}
 function mat4Multiply(a,b){
@@ -80,37 +81,40 @@ function mat4RotateX(rad){
   return new Float32Array([1,0,0,0,  0,c,s,0,  0,-s,c,0,  0,0,0,1]);
 }
 
-// ===== 屏幕四边形的顶点（3D）=====
+// ===== 顶点/UV数据 =====
 function buildPanelVertices(){
-  const hw = PANEL_WIDTH/2, hh = PANEL_HEIGHT/2;
-  // Z=0 的竖直面板（在模型坐标里），稍后整体平移到 (0,0,-distance)
+  const hw = panelW/2, hh = panelH/2;
   return new Float32Array([
     -hw,-hh,0,   hw,-hh,0,   -hw, hh,0,
     -hw, hh,0,   hw,-hh,0,    hw, hh,0
   ]);
 }
-// 纹理坐标生成（考虑旋转/翻转）
 function makeTexcoords(orient, flipX, flipY){
   let uv = [ 0,0, 1,0, 0,1,  0,1, 1,0, 1,1 ];
-  function rot90(arr){
-    const out = [];
-    for(let i=0;i<arr.length;i+=2){ const u=arr[i], v=arr[i+1]; out.push(v, 1-u); }
-    return out;
-  }
+  function rot90(arr){ const out=[]; for(let i=0;i<arr.length;i+=2){ const u=arr[i],v=arr[i+1]; out.push(v,1-u);} return out; }
   let arr = uv;
   if(orient===90)  arr = rot90(arr);
   if(orient===180) arr = rot90(rot90(arr));
   if(orient===270) arr = rot90(rot90(rot90(arr)));
-  for(let i=0;i<arr.length;i+=2){
-    if(flipX) arr[i]   = 1 - arr[i];
-    if(flipY) arr[i+1] = 1 - arr[i+1];
-  }
+  for(let i=0;i<arr.length;i+=2){ if(flipX) arr[i]=1-arr[i]; if(flipY) arr[i+1]=1-arr[i+1]; }
   return new Float32Array(arr);
 }
+function uploadPanelVertices(){
+  gl.bindBuffer(gl.ARRAY_BUFFER,pos3DBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, buildPanelVertices(), gl.STATIC_DRAW);
+}
 function applyTexcoords(){
-  const tc = makeTexcoords(ORIENT, FLIP_X, FLIP_Y);
   gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, tc, gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, makeTexcoords(ORIENT, FLIP_X, FLIP_Y), gl.STATIC_DRAW);
+}
+
+// ===== 根据图片尺寸自动放大面板 =====
+function fitPanelToImage(img){
+  if(!img || !img.width || !img.height) return;
+  const aspect = img.width / img.height; // w/h
+  panelW = PANEL_BASE_WIDTH;
+  panelH = panelW / aspect;   // 等比例放大
+  uploadPanelVertices();
 }
 
 function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
@@ -128,14 +132,14 @@ function setupSockets(){
       if(data.frame){
         document.getElementById("sim").src="data:image/jpeg;base64,"+data.frame;
         const blob=await fetch("data:image/jpeg;base64,"+data.frame).then(r=>r.blob());
-        // 禁用 EXIF 自动旋转；方向全部交给 UV 控制
         frameImageBitmap=await createImageBitmap(blob, { imageOrientation:'none' });
+        fitPanelToImage(frameImageBitmap); // ★ 收到帧后按比例放大面板
       }
     }catch(e){console.warn("WS parse error:",e);}
   };
 }
 
-// ===== 初始化 WebGL（3D 管线）=====
+// ===== GL 初始化（3D）=====
 function initGLResources(gl){
   const vs3D=`
   attribute vec3 a_position;
@@ -157,17 +161,9 @@ function initGLResources(gl){
   const vsObj=compile(gl.VERTEX_SHADER,vs3D), fsObj=compile(gl.FRAGMENT_SHADER,fs);
   program3D=gl.createProgram();gl.attachShader(program3D,vsObj);gl.attachShader(program3D,fsObj);gl.linkProgram(program3D);
 
-  // 顶点缓冲：面板 3D 顶点
-  pos3DBuffer=gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER,pos3DBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, buildPanelVertices(), gl.STATIC_DRAW);
+  pos3DBuffer=gl.createBuffer();  uploadPanelVertices();
+  uvBuffer  =gl.createBuffer();  applyTexcoords();
 
-  // 纹理坐标缓冲
-  uvBuffer=gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER,uvBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, makeTexcoords(ORIENT, FLIP_X, FLIP_Y), gl.STATIC_DRAW);
-
-  // 纹理
   texture=gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D,texture);
   gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
@@ -210,34 +206,28 @@ async function startXR(){
       const vp = baseLayer.getViewport(view);
       gl.viewport(vp.x, vp.y, vp.width, vp.height);
 
-      // 组合矩阵：projection * view^-1
       const proj = view.projectionMatrix;
-      const viewInv = view.transform.inverse.matrix; // 4x4
+      const viewInv = view.transform.inverse.matrix;
       const viewProj = mat4Multiply(proj, viewInv);
 
-      // 模型矩阵：把面板放到头前方，并保持竖直
-      // 模型= 旋转X(PANEL_RX) * 平移(0,0,-PANEL_DISTANCE)
       let model = mat4Translate(0,0,-PANEL_DISTANCE);
       if (PANEL_RX_DEG !== 0){
         model = mat4Multiply(mat4RotateX(deg2rad(PANEL_RX_DEG)), model);
       }
 
-      // 上传矩阵
       gl.useProgram(program3D);
       const uVP = gl.getUniformLocation(program3D,"u_viewProj");
       const uM  = gl.getUniformLocation(program3D,"u_model");
       gl.uniformMatrix4fv(uVP,false,viewProj);
       gl.uniformMatrix4fv(uM,false, model);
 
-      // 背景
       gl.clearColor(0.05,0.05,0.05,1);
       gl.clear(gl.COLOR_BUFFER_BIT);
 
-      // 如果有帧：更新纹理并绘制
       if(frameImageBitmap){
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D,texture);
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); // 方向用 UV 控制
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
         gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frameImageBitmap);
 
         const aPos = gl.getAttribLocation(program3D,"a_position");
@@ -254,7 +244,7 @@ async function startXR(){
       }
     }
 
-    // === 手部数据采集 + 发送（原样） ===
+    // === 手部数据发送（原样） ===
     for(const source of session.inputSources){
       if(!source.hand) continue;
       const handed=source.handedness;
