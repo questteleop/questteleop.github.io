@@ -44,7 +44,6 @@ const JOINTS=["wrist","thumb-metacarpal","thumb-phalanx-proximal","thumb-phalanx
 
 let wsSend=null, wsRecv=null;
 let frameImageBitmap=null;
-let gl, texture, program, positionBuffer, texcoordBuffer;
 
 function log(txt){console.log(txt);const el=document.getElementById('log');if(el)el.textContent=txt;}
 
@@ -66,31 +65,6 @@ function setupSockets(){
   };
 }
 
-function initGLResources(gl){
-  const vs=`attribute vec2 a_position;attribute vec2 a_texcoord;
-  varying vec2 v_texcoord;void main(){gl_Position=vec4(a_position,0,1);v_texcoord=a_texcoord;}`;
-  const fs=`precision mediump float;varying vec2 v_texcoord;uniform sampler2D u_texture;
-  void main(){gl_FragColor=texture2D(u_texture,v_texcoord);}`;
-  function compile(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);return s;}
-  const vsObj=compile(gl.VERTEX_SHADER,vs), fsObj=compile(gl.FRAGMENT_SHADER,fs);
-  program=gl.createProgram();gl.attachShader(program,vsObj);gl.attachShader(program,fsObj);gl.linkProgram(program);
-
-  positionBuffer=gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER,positionBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
-
-  texcoordBuffer=gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER,texcoordBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,1,0,0,1,0,1,1,0,1,1]),gl.STATIC_DRAW);
-
-  texture=gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D,texture);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-}
-
 async function startXR(){
   setupSockets();
   if(!('xr' in navigator)){log("WebXR 不可用");return;}
@@ -101,11 +75,14 @@ async function startXR(){
     session=await navigator.xr.requestSession('immersive-vr',{requiredFeatures:['local-floor'],optionalFeatures:['hand-tracking']});
   }catch(e){log("requestSession 失败："+e);return;}
 
+  // 使用 Canvas 2D 绘制图像
   const canvas=document.createElement('canvas');
-  gl=canvas.getContext('webgl',{xrCompatible:true});
+  canvas.width = 1024;
+  canvas.height = 1024;
+  const ctx = canvas.getContext('2d');
+  const gl = canvas.getContext('webgl', {xrCompatible:true});
   await gl.makeXRCompatible();
   session.updateRenderState({baseLayer:new XRWebGLLayer(session,gl)});
-  initGLResources(gl);
 
   log("XR session started");
   const viewerSpace=await session.requestReferenceSpace('viewer');
@@ -113,30 +90,17 @@ async function startXR(){
   session.requestAnimationFrame(function onFrame(time,frame){
     const baseLayer=session.renderState.baseLayer;
     const viewport=baseLayer.getViewport(frame.session.renderState.baseLayer);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
     gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
+    // 每帧用 2D Canvas 绘制图像
+    ctx.fillStyle = frameImageBitmap ? "black" : "darkred";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     if(frameImageBitmap){
-      gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.bindTexture(gl.TEXTURE_2D,texture);
-      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,frameImageBitmap);
-      gl.generateMipmap(gl.TEXTURE_2D);
-      gl.useProgram(program);
-      const posLoc=gl.getAttribLocation(program,"a_position");
-      const texLoc=gl.getAttribLocation(program,"a_texcoord");
-      gl.bindBuffer(gl.ARRAY_BUFFER,positionBuffer);
-      gl.enableVertexAttribArray(posLoc);
-      gl.vertexAttribPointer(posLoc,2,gl.FLOAT,false,0,0);
-      gl.bindBuffer(gl.ARRAY_BUFFER,texcoordBuffer);
-      gl.enableVertexAttribArray(texLoc);
-      gl.vertexAttribPointer(texLoc,2,gl.FLOAT,false,0,0);
-      gl.drawArrays(gl.TRIANGLES,0,6);
-    } else {
-      // 显示一个红色背景，避免全黑看不到任何东西
-      gl.clearColor(0.3,0,0,1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
+      ctx.drawImage(frameImageBitmap, 0, 0, canvas.width, canvas.height);
     }
 
+    // 手部追踪数据发送
     for(const source of session.inputSources){
       if(!source.hand) continue;
       const handed=source.handedness;
