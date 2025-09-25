@@ -206,6 +206,10 @@ async function startXR(){
 
     gl.bindFramebuffer(gl.FRAMEBUFFER,baseLayer.framebuffer);
 
+    // ✅ 关键修正：只清屏一次（不要在每只眼里清屏，否则会把先画的那只眼擦掉）
+    gl.clearColor(0.05,0.05,0.05,1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
     for (const view of viewerPose.views) {
       const vp = baseLayer.getViewport(view);
       gl.viewport(vp.x, vp.y, vp.width, vp.height);
@@ -216,7 +220,6 @@ async function startXR(){
       const viewProj = mat4Multiply(proj, viewInv);
 
       // 模型矩阵：把面板放到头前方，并保持竖直
-      // 模型= 旋转X(PANEL_RX) * 平移(0,0,-PANEL_DISTANCE)
       let model = mat4Translate(0,0,-PANEL_DISTANCE);
       if (PANEL_RX_DEG !== 0){
         model = mat4Multiply(mat4RotateX(deg2rad(PANEL_RX_DEG)), model);
@@ -228,10 +231,6 @@ async function startXR(){
       const uM  = gl.getUniformLocation(program3D,"u_model");
       gl.uniformMatrix4fv(uVP,false,viewProj);
       gl.uniformMatrix4fv(uM,false, model);
-
-      // 背景
-      gl.clearColor(0.05,0.05,0.05,1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
 
       // 如果有帧：更新纹理并绘制
       if(frameImageBitmap){
