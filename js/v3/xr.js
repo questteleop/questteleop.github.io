@@ -2,26 +2,18 @@ import { setupSockets, wsSend, frameImageBitmap } from './ws.js';
 import {
   MIN_JOINTS, gateTrack,
   quatMul, quatNorm,
-  JOINTS, PANEL_DISTANCE, PANEL_RX_DEG
+  PANEL_DISTANCE, PANEL_RX_DEG
 } from './config.js';
 import { deg2rad, mat4Multiply, mat4Translate, mat4RotateX } from './math.js';
 import { gl, texture, program3D, pos3DBuffer, uvBuffer, initGLResources } from './gl.js';
 
-// ===== 把 XR 坐标统一到：+X 前、+Y 右、+Z 上 =====
+// ===== 坐标变换：XR → +X前/Y右/Z上 =====
 function remapPositionToFwdRightUp(p) {
   return { x: -p.z, y: p.x, z: p.y };
 }
 const rBasis = { x: 0.5, y: 0.5, z: -0.5, w: 0.5 }; // [[0,0,-1],[1,0,0],[0,1,0]]
 function quatConj(q){ return { x:-q.x, y:-q.y, z:-q.z, w:q.w }; }
 const rBasisInv = quatConj(rBasis);
-
-// ==== 简单平滑缓冲 ====
-let lastJoints = {};
-const alpha = 0.3;  // 平滑系数 (0~1)
-
-function smoothValue(prev, next) {
-  return prev + alpha * (next - prev);
-}
 
 export async function startXR(){
   setupSockets();
@@ -33,7 +25,7 @@ export async function startXR(){
   let session;
   try{
     session = await navigator.xr.requestSession('immersive-vr', {
-      requiredFeatures:['local-floor'], // 用来渲染的空间仍然需要
+      requiredFeatures:['local-floor'], // 我们还是要世界坐标
       optionalFeatures:['hand-tracking']
     });
   }catch(e){ console.log("requestSession 失败："+e); return; }
@@ -46,12 +38,11 @@ export async function startXR(){
 
   console.log("XR session started");
 
-  const viewerSpace = await session.requestReferenceSpace('viewer');
   const floorSpace  = await session.requestReferenceSpace('local-floor');
 
   session.requestAnimationFrame(function onFrame(time, frame){
     const baseLayer = session.renderState.baseLayer;
-    const viewerPose = frame.getViewerPose(viewerSpace);
+    const viewerPose = frame.getViewerPose(floorSpace);
     if (!viewerPose) { session.requestAnimationFrame(onFrame); return; }
 
     glCtx.bindFramebuffer(glCtx.FRAMEBUFFER, baseLayer.framebuffer);
@@ -97,51 +88,36 @@ export async function startXR(){
       }
     }
 
-    // === 手部数据采集 + 平滑 + 发送 ===
+    // === 追踪控制器 ===
     for (const source of session.inputSources){
-      if(!source.hand) continue;
-      if (source.hand.trackingState && source.hand.trackingState !== "tracked") {
-        console.warn("[XR] Hand not tracked, skipping this frame");
-        continue;
-      }
-      const handed = source.handedness;
-      const joints = {};
-      let validCount = 0;
+      if (!source.gamepad) continue; // 只处理控制器
+      const pose = frame.getPose(source.gripSpace, floorSpace);
+      if (!pose) continue;
 
-      for (const j of JOINTS){
-        const js = source.hand.get(j); if(!js) continue;
-        // 注意：改为用 viewerSpace 得到相对头显位置
-        const pose = frame.getJointPose(js, viewerSpace);
-        if(!pose) continue;
+      const P1 = remapPositionToFwdRightUp(pose.transform.position);
+      const qV = pose.transform.orientation;
+      const qTmp = quatMul(rBasis, qV);
+      const q1   = quatNorm(quatMul(qTmp, rBasisInv));
 
-        const P1 = remapPositionToFwdRightUp(pose.transform.position);
-        const qV = pose.transform.orientation;
-        const qTmp = quatMul(rBasis, qV);
-        const q1   = quatNorm(quatMul(qTmp, rBasisInv));
-
-        const prev = lastJoints[j];
-        const smoothed = prev ? {
-          x: smoothValue(prev.x, P1.x),
-          y: smoothValue(prev.y, P1.y),
-          z: smoothValue(prev.z, P1.z),
-          qx:q1.x, qy:q1.y, qz:q1.z, qw:q1.w
-        } : {x:P1.x, y:P1.y, z:P1.z, qx:q1.x, qy:q1.y, qz:q1.z, qw:q1.w};
-
-        joints[j] = smoothed;
-        validCount++;
+      // 检查按键状态
+      let gripValue = 1.0;
+      if (source.gamepad && source.gamepad.buttons.length > 1) {
+        gripValue = source.gamepad.buttons[1].value; // 一般 indexTrigger 是按钮1
       }
 
-      lastJoints = joints;
+      const out = {
+        t: time,
+        space: "floorSpace-controller",
+        hand: source.handedness,
+        controller: {
+          position: [P1.x, P1.y, P1.z],
+          quat: [q1.w, q1.x, q1.y, q1.z],
+          grip: gripValue
+        }
+      };
 
-      const needed = ["wrist","index-finger-metacarpal","pinky-finger-metacarpal","middle-finger-metacarpal"];
-      const missing = needed.filter(n=>!(n in joints));
-      if (missing.length > 0) {
-        console.warn(`[XR] Missing key joints: ${missing.join(", ")}`);
-      }
-
-      if(validCount>=MIN_JOINTS ? gateTrack(handed,true) : gateTrack(handed,false)){
-        const out={ t:time, space:'viewerSpace (relative to HMD)', hand:handed, joints };
-        if (wsSend && wsSend.readyState===1) wsSend.send(JSON.stringify(out));
+      if (wsSend && wsSend.readyState===1) {
+        wsSend.send(JSON.stringify(out));
       }
     }
 
