@@ -18,7 +18,7 @@ export async function startXR(){
   let session;
   try{
     session = await navigator.xr.requestSession('immersive-vr', {
-      requiredFeatures:['local-floor'],    // 只请求我们需要的
+      requiredFeatures:['local-floor'],
       optionalFeatures:['hand-tracking']
     });
   }catch(e){ console.log("requestSession 失败："+e); return; }
@@ -38,7 +38,7 @@ export async function startXR(){
   session.requestAnimationFrame(function onFrame(time, frame){
     const baseLayer = session.renderState.baseLayer;
 
-    // ===== 渲染（保持你原有逻辑，不改）=====
+    // ===== 渲染（保持原逻辑）=====
     const viewerPose = frame.getViewerPose(viewerSpace);
     if (!viewerPose) { session.requestAnimationFrame(onFrame); return; }
 
@@ -88,10 +88,9 @@ export async function startXR(){
     // ===== 仅采集 & 上送原始数据：不做变换/去噪/去 yaw =====
     // 额外把头部在 floor & viewer 的姿态也带上（下游更好做配准）
     const headFloorPose  = frame.getViewerPose(floorSpace);
-    const headViewerPose = viewerPose; // 已有
+    const headViewerPose = viewerPose;
     const head_raw = {
       floor: headFloorPose ? {
-        // 用第一个 view 近似 viewer/head transform（平台通常相同）
         pos: headFloorPose.views[0]?.transform?.position ?? null,
         quat: headFloorPose.views[0]?.transform?.orientation ?? null,
       } : null,
@@ -101,13 +100,15 @@ export async function startXR(){
       } : null
     };
 
+    // —— 收集两只手的候选，然后只发送“当前被追踪手” ——
+    const candidates = []; // {handed, validCountFloor, joints, joints_raw}
+
     for (const source of session.inputSources){
       if(!source.hand) continue;
       const handed = source.handedness;
 
       const joints = {};     // 兼容字段：扁平，取 floor 空间
       const joints_raw = {}; // 完整原始：同时带 floor & viewer
-
       let validCountFloor = 0;
 
       for (const j of JOINTS){
@@ -156,18 +157,30 @@ export async function startXR(){
         }
       }
 
-      if (validCountFloor>=MIN_JOINTS ? gateTrack(handed,true) : gateTrack(handed,false)){
-        const out = {
-          t: time,
-          space: 'raw',          // 明确告诉下游：未处理的原始测量
-          hand: handed,
-          head_raw,              // 头部 floor/viewer
-          joints,                // 兼容老格式：floor 扁平
-          joints_raw             // 新格式：floor + viewer 全量
-        };
-        if (wsSend && wsSend.readyState===1) wsSend.send(JSON.stringify(out));
+      // 更新状态机；只把“TRACKED”状态的手作为候选
+      const isGood = validCountFloor >= MIN_JOINTS;
+      if (gateTrack(handed, isGood)) {
+        candidates.push({ handed, validCountFloor, joints, joints_raw });
       }
     }
+
+    // 只发送当前“被追踪”的一只：关节数最多者；若并列，偏向已跟踪者（由 gateTrack 保证连续性）
+    if (candidates.length > 0) {
+      candidates.sort((a,b)=> b.validCountFloor - a.validCountFloor);
+      const pick = candidates[0];
+
+      const out = {
+        t: time,
+        space: 'raw',
+        tracking: pick.handed,   // ★ 新增：当前被追踪手 'left' | 'right'
+        hand: pick.handed,
+        head_raw,
+        joints: pick.joints,
+        joints_raw: pick.joints_raw
+      };
+      if (wsSend && wsSend.readyState===1) wsSend.send(JSON.stringify(out));
+    }
+    // else：两只手都未进入 TRACKED，不发包（维持安静）
 
     session.requestAnimationFrame(onFrame);
   });
