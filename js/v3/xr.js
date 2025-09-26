@@ -1,21 +1,17 @@
 import { setupSockets, wsSend, frameImageBitmap } from './ws.js';
 import {
   MIN_JOINTS, gateTrack,
-  // transformPos, // 不再使用
-  quatMul, quatNorm, qR, qR_inv, // 保留 import 以减少改动面
+  quatMul, quatNorm, qR, qR_inv,
   JOINTS, PANEL_DISTANCE, PANEL_RX_DEG
 } from './config.js';
 import { deg2rad, mat4Multiply, mat4Translate, mat4RotateX } from './math.js';
 import { gl, texture, program3D, pos3DBuffer, uvBuffer, initGLResources } from './gl.js';
 
 // ===== 把 XR 坐标统一到：+X 前、+Y 右、+Z 上 =====
-// 位置基变换：x' = -z, y' = x, z' = y
 function remapPositionToFwdRightUp(p) {
   return { x: -p.z, y: p.x, z: p.y };
 }
-// 姿态基变换：q' = r ⊗ q ⊗ r^{-1}
-// 对应矩阵 [[0,0,-1],[1,0,0],[0,1,0]] 的四元数：
-const rBasis = { x: 0.5, y: 0.5, z: -0.5, w: 0.5 };
+const rBasis = { x: 0.5, y: 0.5, z: -0.5, w: 0.5 }; // [[0,0,-1],[1,0,0],[0,1,0]]
 function quatConj(q){ return { x:-q.x, y:-q.y, z:-q.z, w:q.w }; }
 const rBasisInv = quatConj(rBasis);
 
@@ -29,8 +25,8 @@ export async function startXR(){
   let session;
   try{
     session = await navigator.xr.requestSession('immersive-vr', {
-      requiredFeatures:['local-floor'],     // 需要绝对位置
-      optionalFeatures:['hand-tracking']    // 启用手部
+      requiredFeatures:['local-floor'],     // 用绝对位置
+      optionalFeatures:['hand-tracking']
     });
   }catch(e){ console.log("requestSession 失败："+e); return; }
 
@@ -42,9 +38,7 @@ export async function startXR(){
 
   console.log("XR session started");
 
-  // 渲染仍用 viewer（不改你的画面逻辑）
   const viewerSpace = await session.requestReferenceSpace('viewer');
-  // 绝对位置用 local-floor
   const floorSpace  = await session.requestReferenceSpace('local-floor');
 
   session.requestAnimationFrame(function onFrame(time, frame){
@@ -53,8 +47,6 @@ export async function startXR(){
     if (!viewerPose) { session.requestAnimationFrame(onFrame); return; }
 
     glCtx.bindFramebuffer(glCtx.FRAMEBUFFER, baseLayer.framebuffer);
-
-    // 只清屏一次，避免擦掉先绘制的一只眼
     glCtx.clearColor(0.05,0.05,0.05,1);
     glCtx.clear(glCtx.COLOR_BUFFER_BIT);
 
@@ -97,37 +89,40 @@ export async function startXR(){
       }
     }
 
-    // === 手部数据采集 + 发送（位置：local-floor；朝向：viewer；统一到 X前/Y右/Z上） ===
+    // === 手部数据采集 + 发送 ===
     for (const source of session.inputSources){
       if(!source.hand) continue;
       const handed = source.handedness;
-      const joints = {}; let validCount = 0;
+      const joints = {};
+      let validCount = 0;
 
       for (const j of JOINTS){
         const js = source.hand.get(j); if(!js) continue;
 
-        // 位置用 local-floor（绝对）
-        const posePos = frame.getJointPose(js, floorSpace);
-        // 朝向用 viewer（方向直觉）
-        const poseOri = frame.getJointPose(js, viewerSpace);
+        // 位置 + 朝向都用 floorSpace（绝对）
+        const pose = frame.getJointPose(js, floorSpace);
+        if(!pose) continue;
 
-        if(!posePos || !poseOri || posePos.radius==null) continue;
-
-        // 位置基变换：XR -> (前/右/上)
-        const P1 = remapPositionToFwdRightUp(posePos.transform.position);
-
-        // 朝向基变换：q' = r ⊗ q_viewer ⊗ r^{-1}，并单位化
-        const qV = poseOri.transform.orientation;
+        const P1 = remapPositionToFwdRightUp(pose.transform.position);
+        const qV = pose.transform.orientation;
         const qTmp = quatMul(rBasis, qV);
-        const q1 = quatNorm(quatMul(qTmp, rBasisInv));
+        const q1   = quatNorm(quatMul(qTmp, rBasisInv));
 
-        joints[j] = { x:P1.x, y:P1.y, z:P1.z, qx:q1.x, qy:q1.y, qz:q1.z, qw:q1.w, radius:posePos.radius };
+        joints[j] = { x:P1.x, y:P1.y, z:P1.z,
+                      qx:q1.x, qy:q1.y, qz:q1.z, qw:q1.w,
+                      radius: pose.radius ?? null };
         validCount++;
       }
 
+      // 调试：缺失关键 joints 时提示
+      const needed = ["wrist","index-finger-metacarpal","pinky-finger-metacarpal","middle-finger-metacarpal"];
+      const missing = needed.filter(n=>!(n in joints));
+      if (missing.length > 0) {
+        console.warn(`[XR] Missing key joints: ${missing.join(", ")}`);
+      }
+
       if(validCount>=MIN_JOINTS ? gateTrack(handed,true) : gateTrack(handed,false)){
-        // 标注我们输出的位置参考系
-        const out={ t:time, space:'local-floor(pos)+viewer(ori)', hand:handed, joints };
+        const out={ t:time, space:'floorSpace (abs pos+ori)', hand:handed, joints };
         if (wsSend && wsSend.readyState===1) wsSend.send(JSON.stringify(out));
       }
     }
