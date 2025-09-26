@@ -5,10 +5,6 @@ from websockets.server import serve
 import math
 import time
 
-# =================== 模式选择 ===================
-SCHEMA_GRIPPER = "gripper"   # 原 WebXR 关节输入 -> 计算 palm/angles
-SCHEMA_DEX     = "dex"       # 灵巧手：dof_names + qpos (+ 可选 pose) 透传
-
 # --------- 简单向量/四元数工具 ----------
 def vsub(a,b):  return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
 def vadd(a,b):  return (a[0]+b[0], a[1]+b[1], a[2]+b[2])
@@ -26,7 +22,7 @@ def angle_between(a,b):  # 无符号角（度）
     a,b = vnorm(a), vnorm(b)
     return math.degrees(math.acos(clamp(vdot(a,b))))
 
-def signed_angle_on_plane(ref, vec, n):  # 带符号角（度）
+def signed_angle_on_plane(ref, vec, n):  # 带符号角（度），逆时针为正（右手定则）
     ref_p = vnorm(proj_on_plane(ref, n))
     vec_p = vnorm(proj_on_plane(vec, n))
     ang = math.degrees(math.acos(clamp(vdot(ref_p, vec_p))))
@@ -74,37 +70,54 @@ FINGERS = {
     "pinky":  ["pinky-finger-metacarpal","pinky-finger-phalanx-proximal","pinky-finger-phalanx-intermediate","pinky-finger-phalanx-distal","pinky-finger-tip"],
 }
 
-# ----------------- WebXR → palm/angles 计算 -----------------
 def compute_palm_frame(jpos, handedness):
+    """
+    以 wrist 为基准，利用 index/pinky metacarpal 估计手掌坐标系：
+    - u 轴：从食指掌骨到小指掌骨（横向 across palm）
+    - w 轴：手掌法线（大致指向手掌外侧）
+    - v 轴：u×w，保证右手系
+    """
     wrist = jpos["wrist"]
     idx_m = jpos["index-finger-metacarpal"]
     pky_m = jpos["pinky-finger-metacarpal"]
 
-    u = vnorm(vsub(pky_m, idx_m))                                  # across palm
-    w = vnorm(vcross(vsub(pky_m, wrist), vsub(idx_m, wrist)))      # palm normal
+    u = vnorm(vsub(pky_m, idx_m))
+    # palm normal: 用 (pinky - wrist) × (index - wrist)
+    w = vnorm(vcross(vsub(pky_m, wrist), vsub(idx_m, wrist)))
+    # 让左右手方向一致（可选）：左手时翻转法线
     if handedness == "left":
-        w = vscale(w, -1.0)  # 左右手统一法线方向
+        w = vscale(w, -1.0)
     v = vnorm(vcross(w, u))
+    # 再正交一次，确保数值稳定
     w = vnorm(vcross(u, v))
-    origin = wrist
+    origin = wrist  # 也可用四个掌骨平均值
     q = quat_from_axes(u, v, w)
-    return origin, (u,v,w), q  # (pos), (axes), quat(x,y,z,w)
+    return origin, (u,v,w), q  # 位置、旋转基、四元数
 
 def finger_angles(jpos, palm_axes, handedness):
-    u,v,w = palm_axes
+    """
+    计算每根手指的 MCP/PIP/DIP 屈伸角；MCP 还给一个“外展/内收”角（相对手掌平面）。
+    角度单位：度。约定：屈曲为正；外展方向以右手定则给符号（左手会自动取反）。
+    """
+    u,v,w = palm_axes  # w 约为手掌法线
     wrist = jpos["wrist"]
     mid_ref = jpos["middle-finger-metacarpal"]
-    forward_ref = proj_on_plane(vsub(mid_ref, wrist), w)
+    forward_ref = proj_on_plane(vsub(mid_ref, wrist), w)  # 手掌平面内的“前”参考
 
     results = {}
     for name, chain in FINGERS.items():
+        # 取关键点
         P = [jpos[k] for k in chain]
+        # 骨向量
         segs = [vsub(P[i+1], P[i]) for i in range(len(P)-1)]
+        # MCP 屈伸：用第一节骨与手掌法线的夹角（伸直≈0°，握拳增大）
         mcp_flex = 180.0 - angle_between(segs[0], w)
+        # MCP 外展/内收：第一节骨投影到手掌平面，与“前向参考”之间的带符号角
         abd = signed_angle_on_plane(forward_ref, segs[0], w)
-
+        # PIP/DIP：相邻骨夹角
         pip = dip = None
         if name == "thumb":
+            # 拇指：近节/远节两段
             pip = angle_between(segs[0], segs[1]) if len(segs)>=2 else None
             dip = angle_between(segs[1], segs[2]) if len(segs)>=3 else None
         else:
@@ -112,6 +125,7 @@ def finger_angles(jpos, palm_axes, handedness):
                 pip = angle_between(segs[0], segs[1])
                 dip = angle_between(segs[1], segs[2])
 
+        # 左手把外展角取反，使“向食指侧”为正
         if handedness == "left" and abd is not None:
             abd = -abd
 
@@ -124,62 +138,27 @@ def finger_angles(jpos, palm_axes, handedness):
     return results
 
 def compute_hand_kinematics(frame):
+    """
+    frame: 你解出来的单帧 JSON（服务器收到的 out）
+    打印：手掌 pose（位置+四元数）与每指关节角
+    """
     hand = frame.get("hand")
     joints = frame.get("joints", {})
-    jpos = {name: (v["x"], v["y"], v["z"])
-            for name, v in joints.items()
+    # 组装 pos 字典
+    jpos = {name: (v["x"], v["y"], v["z"]) for name, v in joints.items()
             if isinstance(v, dict) and all(k in v for k in ("x","y","z"))}
-    if "wrist" not in jpos or "middle-finger-tip" not in jpos:
+    # 必要关键点是否齐全
+    need = {"wrist","index-finger-metacarpal","pinky-finger-metacarpal","middle-finger-metacarpal"}
+    if not need.issubset(jpos.keys()):
+        print("insufficient joints for kinematics")
         return None
 
-    wrist = jpos["wrist"]
-    mid_tip = jpos["middle-finger-tip"]
+    origin, axes, q = compute_palm_frame(jpos, hand)
+    angles = finger_angles(jpos, axes, hand)
 
-    # 平移
-    origin = wrist
-
-    # 只计算 yaw：投影到水平面
-    fwd = vsub(mid_tip, wrist)
-    fwd = (fwd[0], 0, fwd[2])  # ignore vertical component
-    fwd_n = vnorm(fwd)
-    yaw = math.atan2(fwd_n[0], fwd_n[2])  # x,z 平面角
-
-    # 用 yaw 构造一个只旋转 yaw 的四元数
-    qw = math.cos(yaw/2)
-    qy = math.sin(yaw/2)
-    quat = (0.0, qy, 0.0, qw)  # x,y,z,w
-
-    return hand, *origin, *quat, None
-
-
-# ----------------- Dex 输入校验/打包 -----------------
-def valid_dex_frame(frame: dict) -> bool:
-    """
-    Dex 帧的最小条件：
-      - hand
-      - dof_names(list[str]) 与 qpos(list[float]) 长度一致且 >0
-      - pose 可选: {"origin":[x,y,z], "quat":[w,x,y,z]}
-    """
-    if not isinstance(frame, dict): return False
-    if "hand" not in frame: return False
-    dn, q = frame.get("dof_names"), frame.get("qpos")
-    if not (isinstance(dn, list) and isinstance(q, list) and len(dn)==len(q) and len(dn)>0):
-        return False
-    return True
-
-def _safe_number_list(xs):
-    """### CHANGED: 将 qpos 转成 float 列表并剔除 NaN/Inf（保持长度不变，非法项置 0.0）"""
-    out = []
-    for v in xs:
-        try:
-            f = float(v)
-            if math.isfinite(f):
-                out.append(f)
-            else:
-                out.append(0.0)
-        except Exception:
-            out.append(0.0)
-    return out
+    ox,oy,oz = origin
+    qx,qy,qz,qw = q
+    return hand, ox, oy, oz, qx, qy, qz, qw, angles
 
 # --- 每个订阅者一个队列，慢订阅者丢旧保新 ---
 SUB_QUEUES = {}   # ws -> asyncio.Queue
@@ -219,6 +198,7 @@ async def broadcast(msg: str):
         try:
             q.put_nowait(msg)
         except asyncio.QueueFull:
+            # 丢旧保新
             try:
                 _ = q.get_nowait()
                 q.put_nowait(msg)
@@ -227,13 +207,13 @@ async def broadcast(msg: str):
     for ws in dead:
         unregister_subscriber(ws)
 
-def make_packet_gripper(frame: dict):
+def make_packet(frame: dict):
     """
-    Gripper 模式（WebXR）：计算 palm 与 angles，并输出统一包
+    输入：网页发来的单帧 dict（含 hand/joints/...）
+    输出：发送到另一个进程的精简字典（你也可以直接返回 frame 原样）
     """
     kin = compute_hand_kinematics(frame)
     if kin is None:
-        print("[hub] insufficient joints for kinematics (gripper)")
         return None
 
     hand, ox, oy, oz, qx, qy, qz, qw, angles = kin
@@ -242,54 +222,16 @@ def make_packet_gripper(frame: dict):
         "space": frame.get("space", "local-floor"),
         "server_ts": time.time(),
         "hand": hand,
-        "palm": { "origin": (ox, oy, oz), "quat": (qw, qx, qy, qz) },
+        "palm": {
+            "origin": (ox, oy, oz),
+            "quat": (qx, qy, qz, qw),   # ← 改成 xyzw（和下游一致）
+        },
         "angles": angles
     }
-    # ### CHANGED: 打印标签与数值顺序一致（xyzw 标签对应 qx,qy,qz,qw）
-    print(f"[{hand}] GRIPPER palm pos=({ox:+.3f},{oy:+.3f},{oz:+.3f}) quat(xyzw)=({qx:+.3f},{qy:+.3f},{qz:+.3f},{qw:+.3f})")
+    print(f"[{hand}] PALM pose: pos=({ox:+.3f},{oy:+.3f},{oz:+.3f}) quat=({qx:+.3f},{qy:+.3f},{qz:+.3f},{qw:+.3f})")
     return out
 
-def make_packet_dex(frame: dict):
-    """
-    Dex 模式：轻度校验 + 透传（并对 qpos 做最小清洗）
-    """
-    if not valid_dex_frame(frame):
-        print("[hub] invalid dex frame; dropped")
-        return None
-
-    hand = frame.get("hand")
-    dof_names = list(frame.get("dof_names"))  # 保持原序
-    qpos_raw  = frame.get("qpos")
-    qpos      = _safe_number_list(qpos_raw)   # ### CHANGED: 转 float 并剔除 NaN/Inf
-
-    palm = None
-    pose = frame.get("pose")
-    if isinstance(pose, dict):
-        origin = pose.get("origin")  # [x,y,z]
-        quat   = pose.get("quat")    # [w,x,y,z]
-        if isinstance(origin, (list,tuple)) and len(origin)==3 and isinstance(quat, (list,tuple)) and len(quat)==4:
-            # 统一为 tuple，避免 numpy 类型
-            palm = {"origin": (float(origin[0]), float(origin[1]), float(origin[2])),
-                    "quat":   (float(quat[0]),   float(quat[1]),   float(quat[2]),   float(quat[3]))}
-
-    out = {
-        "t": frame.get("t"),
-        "space": frame.get("space", "dex"),
-        "server_ts": time.time(),
-        "hand": hand,
-        "dex": {
-            "dof_names": dof_names,
-            "qpos": qpos,
-            "dof": len(dof_names),   # ### CHANGED: 附上 DOF 计数，便于下游断言 22/16 等
-        }
-    }
-    if palm is not None:
-        out["palm"] = palm
-
-    print(f"[{hand}] DEX dof={len(dof_names)}  pose={'Y' if palm else 'N'}")
-    return out
-
-async def handler(ws, forced_schema: str):
+async def handler(ws):
     path = getattr(ws, "path", "/")
     peer = ws.remote_address
 
@@ -301,7 +243,7 @@ async def handler(ws, forced_schema: str):
             unregister_subscriber(ws)
         return
 
-    print("producer connected:", peer, "path=", path, "schema=", forced_schema)
+    print("producer connected:", peer, "path=", path)
     try:
         async for msg in ws:
             try:
@@ -310,48 +252,31 @@ async def handler(ws, forced_schema: str):
                 print("[hub] bad JSON, ignored")
                 continue
 
-            # 图片帧透传（与手帧并行）
             if "frame" in frame:
+                print(f"[hub] got frame message, len={len(frame['frame'])}, broadcasting...")
                 await broadcast(json.dumps(frame, separators=(",", ":")))
                 continue
 
-            out = None
-            if forced_schema == SCHEMA_GRIPPER:
-                # 期望 WebXR 结构：hand + joints
-                if ("hand" in frame) and ("joints" in frame) and isinstance(frame["joints"], dict):
-                    out = make_packet_gripper(frame)
-                else:
-                    print("[hub] non-gripper frame received under gripper mode; dropped")
-                    continue
-            elif forced_schema == SCHEMA_DEX:
-                # 期望 dex 结构：hand + dof_names + qpos (+ pose)
-                out = make_packet_dex(frame)
-            else:
-                print(f"[hub] unknown schema='{forced_schema}'")
-                continue
-
+            out = make_packet(frame)
             if out:
+                print(f"[hub] got hand packet, broadcasting (hand={out['hand']})")
                 await broadcast(json.dumps(out, separators=(",", ":")))
+            else:
+                print("[hub] hand packet ignored (insufficient joints)")
     except websockets.ConnectionClosed:
         print("producer disconnected:", peer)
 
-async def main(host, port, forced_schema: str):
-    if forced_schema not in (SCHEMA_GRIPPER, SCHEMA_DEX):
-        raise SystemExit(f"--schema must be one of: {SCHEMA_GRIPPER}, {SCHEMA_DEX}")
-
-    async with serve(lambda ws: handler(ws, forced_schema),
-                     host, port,
+async def main(host, port):
+    async with serve(handler, host, port,
                      process_request=process_request,
                      max_size=2**22, ping_interval=30, ping_timeout=30):
         print(f"[hand-hub] listening ws://{host}:{port}  "
-              f"(producers -> / , subscribers -> /sub)  schema={forced_schema}")
+              f"(producers -> / or /ingest, subscribers -> /sub)")
         await asyncio.Future()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--schema", choices=[SCHEMA_GRIPPER, SCHEMA_DEX], required=True,
-                    help="输入数据格式：gripper（WebXR 手势→夹爪）| dex（灵巧手 DOF）")
     args = ap.parse_args()
-    asyncio.run(main(args.host, args.port, args.schema))
+    asyncio.run(main(args.host, args.port))
