@@ -124,25 +124,33 @@ def finger_angles(jpos, palm_axes, handedness):
     return results
 
 def compute_hand_kinematics(frame):
-    """
-    WebXR 帧 → (hand, ox,oy,oz, qx,qy,qz,qw, angles)
-    """
     hand = frame.get("hand")
     joints = frame.get("joints", {})
     jpos = {name: (v["x"], v["y"], v["z"])
             for name, v in joints.items()
             if isinstance(v, dict) and all(k in v for k in ("x","y","z"))}
-
-    need = {"wrist","index-finger-metacarpal","pinky-finger-metacarpal","middle-finger-metacarpal"}
-    if not need.issubset(jpos.keys()):
+    if "wrist" not in jpos or "middle-finger-tip" not in jpos:
         return None
 
-    origin, axes, q = compute_palm_frame(jpos, hand)
-    angles = finger_angles(jpos, axes, hand)
+    wrist = jpos["wrist"]
+    mid_tip = jpos["middle-finger-tip"]
 
-    ox,oy,oz = origin
-    qx,qy,qz,qw = q
-    return hand, ox, oy, oz, qx, qy, qz, qw, angles
+    # 平移
+    origin = wrist
+
+    # 只计算 yaw：投影到水平面
+    fwd = vsub(mid_tip, wrist)
+    fwd = (fwd[0], 0, fwd[2])  # ignore vertical component
+    fwd_n = vnorm(fwd)
+    yaw = math.atan2(fwd_n[0], fwd_n[2])  # x,z 平面角
+
+    # 用 yaw 构造一个只旋转 yaw 的四元数
+    qw = math.cos(yaw/2)
+    qy = math.sin(yaw/2)
+    quat = (0.0, qy, 0.0, qw)  # x,y,z,w
+
+    return hand, *origin, *quat, None
+
 
 # ----------------- Dex 输入校验/打包 -----------------
 def valid_dex_frame(frame: dict) -> bool:
