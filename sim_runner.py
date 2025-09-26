@@ -24,6 +24,10 @@ from utils.utils import next_name_by_count
 POS_WINDOW = deque(maxlen=5)
 QUAT_WINDOW = deque(maxlen=5)
 
+def reset_smoothing():
+    POS_WINDOW.clear()
+    QUAT_WINDOW.clear()
+
 def average_quaternion(quats):
     if len(quats) == 1:
         return quats[0]
@@ -180,21 +184,17 @@ def receiver_thread(ws_url: str, q: queue.Queue, stop_evt: threading.Event):
 # =========================
 # 新增：倒计时 + 预热 + 初始化对齐
 # =========================
-def run_countdown_preheat(env, q, img_queue, args, duration_s=3.0):
+def run_countdown_preheat(env, q, img_queue, args, duration_s=3.0, avg_frames=30):
     """
-    在倒计时期间完成 prepare 预热 & 初始化对齐。
-    结束时返回：i 设置为 args.prepare_frames（让主循环直接进入“可控态”），
-    以及 position_correction / init_quest_R / init_ee_R / last_quest_pose。
+    倒计时期间预热并收集多帧手姿态，平均后做初始化对齐。
+    返回：position_correction, init_quest_R, init_ee_R
     """
     tick = 1.0 / float(args.tick_hz)
     target_frames = max(1, int(round(duration_s * float(args.tick_hz))))
 
     i_count = 0
-    last_quest_pose = None
-    position_correction = None
-    init_quest_R = None
-    init_ee_R = None
-
+    quest_positions = []
+    quest_quats = []
     next_t = time.perf_counter()
 
     while i_count < target_frames:
@@ -204,7 +204,7 @@ def run_countdown_preheat(env, q, img_queue, args, duration_s=3.0):
             continue
         next_t += tick
 
-        # 拿最新一包手数据
+        # 取最新一包手数据
         pkt = None
         try:
             while True:
@@ -212,59 +212,68 @@ def run_countdown_preheat(env, q, img_queue, args, duration_s=3.0):
         except queue.Empty:
             pass
 
-        # 空动作步进
         action = empty_action_generator()
-
-        obs, reward, terminated, done, info = env.step(action)
+        obs, _, _, _, _ = env.step(action)
         front_img = obs['sensor_data']['front_camera']['rgb'].cpu().numpy()
         left_img  = obs['sensor_data']['left_camera']['rgb'].cpu().numpy()
         top_img   = obs['sensor_data']['top_camera']['rgb'].cpu().numpy()
 
-        # 倒计时叠字
         secs_left = int(np.ceil((target_frames - i_count) / float(args.tick_hz)))
         combo = make_composite(front_img, left_img, top_img, target_h=720, gap=6)
         cv2.rectangle(combo, (12, 12), (260, 70), (0, 0, 0), thickness=-1)
         cv2.putText(combo, f"Starting in {secs_left}s",
                     (18, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,255,255), 2, cv2.LINE_AA)
 
-        # 本地显示
         cv2.imshow("front_view", cv2.cvtColor(front_img, cv2.COLOR_RGB2BGR))
         cv2.imshow("left_view",  cv2.cvtColor(left_img,  cv2.COLOR_RGB2BGR))
         cv2.imshow("top_view",   cv2.cvtColor(top_img,   cv2.COLOR_RGB2BGR))
         cv2.waitKey(1)
 
-        # 上传
         send_frame_to_queue(combo, img_queue)
 
-        # 记录最后一帧手姿态（用于对齐）
         if pkt is not None:
             palm = pkt.get("palm")
             if palm:
-                origin = palm.get("origin")
-                quat   = palm.get("quat")
-                if origin is not None and quat is not None:
-                    last_quest_pose = np.array([*origin, *quat], dtype=np.float32)
+                origin = np.array(palm.get("origin"), dtype=np.float32)
+                quat   = np.array(palm.get("quat"), dtype=np.float32)
+                quest_positions.append(origin * args.position_scale)
+                # 转换成 wxyz 顺序方便平均
+                quest_quats.append(np.roll(quat, -1))
 
         i_count += 1
 
-    # 倒计时结束：若拿到过手数据，则完成初始化对齐，并开始录制（若支持）
-    if last_quest_pose is not None:
-        quest_position = last_quest_pose[:3] * args.position_scale
-        quest_quat     = last_quest_pose[3:]
-        quest_R        = quat_to_R(quest_quat)
+    position_correction = None
+    init_quest_R = None
+    init_ee_R = None
+    last_quest_pose = None
+
+    # 仅在收集到足够帧时才计算平均
+    if len(quest_positions) >= avg_frames:
+        quest_positions = np.stack(quest_positions[-avg_frames:], axis=0)
+        quest_quats = np.stack(quest_quats[-avg_frames:], axis=0)
+
+        avg_pos = quest_positions.mean(axis=0)
+        avg_quat = average_quaternion(quest_quats)  # wxyz
+        quest_R = R.from_quat(avg_quat[[1,2,3,0]]).as_matrix()  # 转 xyzw -> R
 
         ee_pos  = env.env.env.agent.tcp_pos.cpu().numpy()
         ee_quat = env.env.env.agent.tcp_quat.cpu().numpy()
         ee_R    = quat_to_R(ee_quat)
 
-        position_correction = quest_position - ee_pos
+        position_correction = avg_pos - ee_pos
         init_quest_R = quest_R
         init_ee_R    = ee_R
+
+        last_quest_pose = np.concatenate([avg_pos, avg_quat[[1,2,3,0]]])
 
         try:
             env.start_record("front_camera")
         except Exception:
             pass
+    else:
+        print(f"[preheat] Warning: only {len(quest_positions)} frames collected, skip re-alignment")
+
+    reset_smoothing()
 
     return {
         "i_after": max(args.prepare_frames, 0),
