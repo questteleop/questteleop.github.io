@@ -10,14 +10,27 @@ import cv2
 import numpy as np
 from loguru import logger
 import time, queue as pyqueue
+from scipy.spatial.transform import Rotation as R
+from collections import deque
 import genesis as gs
 import gymnasium as gym
 from maniladder.envs import ManiLadderBaseEnv
 from maniladder.utils.wrappers.RecordEpisodeWrapper import RecordEpisodeWrapper
 from genesis.utils.geom import quat_to_R, _np_euler_to_R, R_to_quat, quat_to_xyz
 from maniladder import ASSETS_DIR
-
 from utils.utils import next_name_by_count
+
+# ========== 新增：滑动窗口队列 ==========
+POS_WINDOW = deque(maxlen=5)
+QUAT_WINDOW = deque(maxlen=5)
+
+def average_quaternion(quats):
+    if len(quats) == 1:
+        return quats[0]
+    R_list = R.from_quat(quats)  # xyzw
+    R_mean = R_list.mean()
+    return R_mean.as_quat()
+
 
 async def frame_sender(ws_url: str, img_queue: queue.Queue, stop_evt: threading.Event):
     try:
@@ -487,6 +500,15 @@ if __name__ == "__main__":
             
                     quest_position = quest_pose[:3] * args.position_scale
                     quest_quat = quest_pose[3:]
+                    quest_R = quat_to_R(quest_quat)
+
+                    POS_WINDOW.append(quest_position)
+                    QUAT_WINDOW.append(quest_quat)
+
+                    if len(POS_WINDOW) > 1:
+                        quest_position = np.mean(POS_WINDOW, axis=0)
+                        quest_quat = average_quaternion(list(QUAT_WINDOW))
+
                     quest_R = quat_to_R(quest_quat)
 
                     ee_pos = env.env.env.agent.tcp_pos.cpu().numpy()
