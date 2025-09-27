@@ -11,7 +11,7 @@
   // ===== 把 XR 坐标统一到：+X 前、+Y 右、+Z 上 =====
   // 位置基变换：x' = -z, y' = x, z' = y
   function remapPositionToFwdRightUp(p) {
-    return { x: -p.z, y: p.x, z: p.y };
+    return { x: p.z, y: p.x, z: p.y };
   }
   // 姿态基变换：q' = r ⊗ q ⊗ r^{-1}
   // 对应矩阵 [[0,0,-1],[1,0,0],[0,1,0]] 的四元数：
