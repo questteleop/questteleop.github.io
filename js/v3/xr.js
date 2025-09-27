@@ -8,17 +8,23 @@ import {
 import { deg2rad, mat4Multiply, mat4Translate, mat4RotateX } from './math.js';
 import { gl, texture, program3D, pos3DBuffer, uvBuffer, initGLResources } from './gl.js';
 
-// ===== 把 XR 坐标统一到：+X 前、+Y 右、+Z 上 =====
-// 位置基变换：x' = -z, y' = x, z' = y
-function remapPositionToFwdRightUp(p) {
-  return { x: -p.z, y: p.x, z: p.y };
+// ===== 统一到：+X 后、+Y 右、+Z 上 =====
+// 位置基变换：x' =  z, y' = x, z' = y  （把原先“前/右/上”的 x'= -z 改为“后/右/上”的 x'= +z）
+function remapPositionToBackRightUp(p) {
+  return { x: p.z, y: p.x, z: p.y };
 }
+
 // 姿态基变换：q' = r ⊗ q ⊗ r^{-1}
-// 这个 rBasis 对应把 XR 的(大多数设备)轴系变到我们约定的“前/右/上”
+// 先把 XR 常见轴系变到“前/右/上”（FRU），再绕“上”(Z)轴加 180° 航向，得到“后/右/上”（BRU）
 function quatConj(q){ return { x:-q.x, y:-q.y, z:-q.z, w:q.w }; }
-// 注意：如果你的工程里已有 qR/qR_inv 是这个基变换，也可以直接复用；
-// 这里写死一份，避免不同文件的定义不一致。
-const rBasis = { x:  0.5, y:  0.5, z: -0.5, w: 0.5 };
+
+// 原先用于“前/右/上”的基变换（与你之前一致）
+const rFRU = { x:  0.5, y:  0.5, z: -0.5, w: 0.5 };
+// 绕 +Z 轴旋转 180° 的四元数：axis=(0,0,1), angle=π => (0,0,1,0)
+const qYaw180Z = { x:0, y:0, z:1, w:0 };
+
+// 新的“后/右/上”基变换
+const rBasis    = quatMul(qYaw180Z, rFRU);
 const rBasisInv = quatConj(rBasis);
 
 // 关节质量过滤阈值（可按需调整）
@@ -102,7 +108,7 @@ export async function startXR(){
       }
     }
 
-    // ===== 手部数据采集 & 上送：pos/ori 都来自 local-floor（绝对），再统一轴系 =====
+    // ===== 手部数据采集 & 上送：pos/ori 都来自 local-floor（绝对），再统一轴系到“后/右/上” =====
     for (const source of session.inputSources){
       if(!source.hand) continue;
       const handed = source.handedness;
@@ -124,11 +130,11 @@ export async function startXR(){
           continue;
         }
 
-        // 位置：floor → 统一轴系（前/右/上）
+        // 位置：floor → 统一轴系（后/右/上）
         const pf = pose.transform.position;
-        const P1 = remapPositionToFwdRightUp(pf);
+        const P1 = remapPositionToBackRightUp(pf);
 
-        // 朝向：floor → 统一轴系（q' = r ⊗ q ⊗ r^{-1}）
+        // 朝向：floor → 统一轴系（q' = r ⊗ q ⊗ r^{-1}，r 为 BRU 基变换）
         const qf = pose.transform.orientation;
         const qTmp = quatMul(rBasis, qf);
         const q1 = quatNorm(quatMul(qTmp, rBasisInv));
@@ -145,10 +151,11 @@ export async function startXR(){
       if(validCount>=MIN_JOINTS ? gateTrack(handed,true) : gateTrack(handed,false)){
         const out = {
           t: time,
-          space: 'local-floor',  // 统一参考系
+          space: 'local-floor',  // 标注来源参考系
           hand: handed,
           joints
         };
+        // <<<<<< 这里送回本地，数据已经是“后/右/上”坐标与姿态 >>>>>>
         if (wsSend && wsSend.readyState===1) wsSend.send(JSON.stringify(out));
       }
     }
