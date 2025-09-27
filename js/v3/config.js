@@ -22,7 +22,7 @@ export const JOINTS=["wrist","thumb-metacarpal","thumb-phalanx-proximal","thumb-
   "pinky-finger-metacarpal","pinky-finger-phalanx-proximal","pinky-finger-phalanx-intermediate","pinky-finger-phalanx-distal","pinky-finger-tip"];
 
 // ===== 显示屏参数（在你眼前的“看板”）=====
-export const PANEL_DISTANCE = 1.8;     // 到头部的距离（米）
+export const PANEL_DISTANCE = 1.2;     // 到头部的距离（米）
 export const PANEL_WIDTH    = 1.4;     // 面板宽度（米）
 export const PANEL_HEIGHT   = 0.9;     // 面板高度（米）
 export const PANEL_RX_DEG   = 0;       // 围绕X轴旋转（度）
