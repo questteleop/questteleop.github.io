@@ -272,7 +272,7 @@ if __name__ == "__main__":
     ap.add_argument("--video_save_dir", default="tele_videos")
     ap.add_argument("--max_accident_steps", default=4, type=int)
     ap.add_argument("--prepare_frames", default=50, type=int)
-    ap.add_argument("--max_steps", default=600, type=int)
+    ap.add_argument("--max_steps", default=200, type=int)
     ap.add_argument("--position_scale", default=1.5, type=float)
     ap.add_argument("--screen_resolution", default=(2560, 1440), type=tuple)
     ap.add_argument("--RECORDING", default=False, type=bool)
