@@ -98,13 +98,17 @@
       }
 
       // === 手部数据采集 + 发送（位置：local-floor；朝向：viewer；统一到 X前/Y右/Z上） ===
+      const handsPayload = [];   // 收集本帧的左右手子包
+
       for (const source of session.inputSources){
         if(!source.hand) continue;
-        const handed = source.handedness;
-        const joints = {}; let validCount = 0;
+        const handed = source.handedness;   // 'left' | 'right'
+        const joints = {}; 
+        let validCount = 0;
 
         for (const j of JOINTS){
-          const js = source.hand.get(j); if(!js) continue;
+          const js = source.hand.get(j); 
+          if(!js) continue;
 
           // 位置用 local-floor（绝对）
           const posePos = frame.getJointPose(js, floorSpace);
@@ -121,14 +125,36 @@
           const qTmp = quatMul(rBasis, qV);
           const q1 = quatNorm(quatMul(qTmp, rBasisInv));
 
-          joints[j] = { x:P1.x, y:P1.y, z:P1.z, qx:q1.x, qy:q1.y, qz:q1.z, qw:q1.w, radius:posePos.radius };
+          joints[j] = { 
+            x:P1.x, y:P1.y, z:P1.z, 
+            qx:q1.x, qy:q1.y, qz:q1.z, qw:q1.w, 
+            radius:posePos.radius 
+          };
           validCount++;
         }
 
-        if(validCount>=MIN_JOINTS ? gateTrack(handed,true) : gateTrack(handed,false)){
-          // 标注我们输出的位置参考系
-          const out={ t:time, space:'local-floor(pos)+viewer(ori)', hand:handed, joints };
-          if (wsSend && wsSend.readyState===1) wsSend.send(JSON.stringify(out));
+        // 单手门控：够关节数才入列
+        const ok = (validCount >= MIN_JOINTS) ? gateTrack(handed, true)
+                                              : gateTrack(handed, false);
+        if (ok){
+          // 子包沿用“单手包”的语义：hand + joints
+          handsPayload.push({
+            hand: handed,
+            // 这里也可加 t/space 给子包，hand hub 会继承外层；留空也行
+            joints
+          });
+        }
+      }
+
+      // 一帧结束后统一下发一个“多手包”
+      if (handsPayload.length > 0){
+        const out = {
+          t: time,                                           // 帧时间戳
+          space: 'local-floor(pos)+viewer(ori)',             // 统一标注
+          hands: handsPayload                                // 形如 [{hand:'left', joints:{}}, {hand:'right', joints:{}}]
+        };
+        if (wsSend && wsSend.readyState === 1){
+          wsSend.send(JSON.stringify(out));
         }
       }
 
