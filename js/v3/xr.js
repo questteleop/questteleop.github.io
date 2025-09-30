@@ -8,8 +8,8 @@ export async function startXR(){
   let session;
   try{
     session = await navigator.xr.requestSession('immersive-vr', {
-      requiredFeatures:['local-floor'],
-      optionalFeatures:['hand-tracking']
+      requiredFeatures:['local-floor'],     // 需要绝对位置
+      optionalFeatures:['hand-tracking']    // 启用手部
     });
   }catch(e){ console.log("requestSession 失败："+e); return; }
 
@@ -21,48 +21,19 @@ export async function startXR(){
 
   console.log("XR session started");
 
-  const viewerSpace = await session.requestReferenceSpace('viewer');       // 用来取朝向
-  const floorSpace  = await session.requestReferenceSpace('local-floor');  // 用来取绝对位置
-
-  // 小工具：安全取某关节的位姿（pos 用 floor，ori 用 viewer）
-  function getJointPose(frame, source, joint){
-    const js = source.hand.get(joint);
-    if(!js) return null;
-    const pPos = frame.getJointPose(js, floorSpace);
-    const pOri = frame.getJointPose(js, viewerSpace);
-    if(!pPos || !pOri || pPos.radius==null) return null;
-
-    // 位置统一基：X前/Y右/Z上
-    const P = remapPositionToFwdRightUp(pPos.transform.position);
-    // 朝向统一基：q' = r ⊗ q_viewer ⊗ r^{-1}，并单位化
-    const qV = pOri.transform.orientation;
-    const qTmp = quatMul(rBasis, qV);
-    const q1 = quatNorm(quatMul(qTmp, rBasisInv)); // xyzw
-
-    return {
-      pos: { x:P.x, y:P.y, z:P.z },
-      quat_xyzw: q1
-    };
-  }
-
-  // 计算拇指尖-食指尖捏合距离（米）；失败返回 null
-  function pinchDistance(frame, source){
-    const jt = getJointPose(frame, source, "thumb-tip");
-    const ji = getJointPose(frame, source, "index-finger-tip");
-    if(!jt || !ji) return null;
-    const dx = jt.pos.x - ji.pos.x;
-    const dy = jt.pos.y - ji.pos.y;
-    const dz = jt.pos.z - ji.pos.z;
-    return Math.hypot(dx, dy, dz);
-  }
+  // 渲染仍用 viewer（不改你的画面逻辑）
+  const viewerSpace = await session.requestReferenceSpace('viewer');
+  // 绝对位置用 local-floor
+  const floorSpace  = await session.requestReferenceSpace('local-floor');
 
   session.requestAnimationFrame(function onFrame(time, frame){
     const baseLayer = session.renderState.baseLayer;
     const viewerPose = frame.getViewerPose(viewerSpace);
     if (!viewerPose) { session.requestAnimationFrame(onFrame); return; }
 
-    // ====== 画面渲染（保持你的逻辑不变） ======
     glCtx.bindFramebuffer(glCtx.FRAMEBUFFER, baseLayer.framebuffer);
+
+    // 只清屏一次，避免擦掉先绘制的一只眼
     glCtx.clearColor(0.05,0.05,0.05,1);
     glCtx.clear(glCtx.COLOR_BUFFER_BIT);
 
@@ -105,31 +76,73 @@ export async function startXR(){
       }
     }
 
-    // ====== 手部数据：逐手发送“单手包”，与 Python 端现有解析对齐 ======
+    // === 手部数据采集 + 发送（位置：local-floor；朝向：viewer；统一到 X前/Y右/Z上） ===
     for (const source of session.inputSources){
       if(!source.hand) continue;
+      const handed = source.handedness;   // 'left' | 'right'
+      const joints = {}; 
+      let validCount = 0;
 
-      // 用 wrist 作为 palm 近似
-      const wrist = getJointPose(frame, source, "wrist");
-      if(!wrist) continue; // 该手无效则跳过
+      for (const j of JOINTS){
+        const js = source.hand.get(j); 
+        if(!js) continue;
 
-      // 组 palm 数据：origin 为 [x,y,z]，quat 为 **wxyz**
-      const q = wrist.quat_xyzw; // {x,y,z,w}
+        // 位置用 local-floor（绝对）
+        const posePos = frame.getJointPose(js, floorSpace);
+        // 朝向用 viewer（方向直觉）
+        const poseOri = frame.getJointPose(js, viewerSpace);
+
+        if(!posePos || !poseOri || posePos.radius==null) continue;
+
+        // 位置基变换：XR -> (前/右/上)
+        const P1 = remapPositionToFwdRightUp(posePos.transform.position);
+
+        // 朝向基变换：q' = r ⊗ q_viewer ⊗ r^{-1}，并单位化
+        const qV = poseOri.transform.orientation;
+        const qTmp = quatMul(rBasis, qV);
+        const q1 = quatNorm(quatMul(qTmp, rBasisInv)); // {x,y,z,w} (xyzw)
+
+        joints[j] = { 
+          x:P1.x, y:P1.y, z:P1.z, 
+          qx:q1.x, qy:q1.y, qz:q1.z, qw:q1.w, 
+          radius:posePos.radius 
+        };
+        validCount++;
+      }
+
+      // 单手门控：够关节数才发送
+      const ok = (validCount >= MIN_JOINTS) ? gateTrack(handed, true)
+                                            : gateTrack(handed, false);
+      if (!ok) continue;
+
+      // —— 仅在此处“打包与发送”改为单手包，其它逻辑不动 ——
+
+      // palm：用 wrist 近似；若没有 wrist 则不发这只手
+      const wr = joints["wrist"];
+      if (!wr) continue;
+
+      // palm.origin 为 [x,y,z]；palm.quat 为 **wxyz**（后端会再转 xyzw）
       const palm = {
-        origin: [ wrist.pos.x, wrist.pos.y, wrist.pos.z ],
-        quat:   [ q.w, q.x, q.y, q.z ]  // wxyz，匹配 Python 端的 wxyz_to_xyzw()
+        origin: [wr.x, wr.y, wr.z],
+        quat:   [wr.qw, wr.qx, wr.qy, wr.qz]
       };
 
-      // 捏合距离（可选）
-      const dist = pinchDistance(frame, source);
-      const pinch = (dist!=null) ? { thumb_index_dist: dist } : undefined;
+      // pinch：thumb-tip 到 index-finger-tip 的距离（米），可选
+      let pinch;
+      const tt = joints["thumb-tip"];
+      const it = joints["index-finger-tip"];
+      if (tt && it){
+        const dx = tt.x - it.x, dy = tt.y - it.y, dz = tt.z - it.z;
+        pinch = { thumb_index_dist: Math.hypot(dx, dy, dz) };
+      }
 
-      // 单手包：hand + palm + pinch（与后端单手 schema 一致）
+      // 逐手发送“单手包”：hand + palm + pinch(+可选 joints 供调试)
       const pkt = {
         t: time,
-        hand: source.handedness,     // 'left' | 'right'
-        palm,                        // {origin:[x,y,z], quat:[w,x,y,z]}
-        ...(pinch ? { pinch } : {})  // {thumb_index_dist: m}
+        hand: handed,
+        palm,
+        ...(pinch ? { pinch } : {}),
+        joints // 如果不想传 joints，直接删掉这一行即可
       };
 
       if (wsSend && wsSend.readyState === 1){
