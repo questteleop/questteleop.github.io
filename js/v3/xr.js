@@ -97,79 +97,93 @@
         }
       }
 
-      // === 手部数据采集 + 发送（位置：local-floor；朝向：viewer；统一到 X前/Y右/Z上） ===
+      // === 手部数据采集 + 发送（手坐标系：以 wrist 为原点与参考姿态） ===
+      const handsPayload = [];
+
+      function subVec(a,b){ return {x:a.x-b.x, y:a.y-b.y, z:a.z-b.z}; }
+      function quatMul(a,b){
+        return {
+          x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+          y: a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+          z: a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+          w: a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z
+        };
+      }
+      function quatConj(q){ return {x:-q.x, y:-q.y, z:-q.z, w:q.w}; }
+      function quatNorm(q){
+        const n = Math.hypot(q.x,q.y,q.z,q.w) || 1;
+        return {x:q.x/n, y:q.y/n, z:q.z/n, w:q.w/n};
+      }
+      // 旋转向量：v' = q ⊗ v ⊗ q*
+      function rotateVecByQuat(q, v){
+        const qv = {x:v.x, y:v.y, z:v.z, w:0};
+        const t  = quatMul(q, qv);
+        const r  = quatMul(t, quatConj(q));
+        return {x:r.x, y:r.y, z:r.z};
+      }
+
       for (const source of session.inputSources){
-        if (!source.hand) continue;
+        if(!source.hand) continue;
         const handed = source.handedness;   // 'left' | 'right'
+
+        // 1) wrist 作为手系基准
+        const wristSpace = source.hand.get("wrist");
+        if (!wristSpace){ continue; }
+        const wristPose = frame.getJointPose(wristSpace, viewerSpace);
+        if (!wristPose || wristPose.radius == null){ continue; }
+
+        const Pw = wristPose.transform.position;        // viewer 中的 wrist 位置
+        const Qw = wristPose.transform.orientation;     // viewer 中的 wrist 朝向（单位四元数）
+        const Qw_inv = quatConj(Qw);                    // 单位四元数的逆 = 共轭
+
         const joints = {};
         let validCount = 0;
 
+        // 2) 逐关节转到“手坐标系”
         for (const j of JOINTS){
           const js = source.hand.get(j);
-          if (!js) continue;
+          if(!js) continue;
 
-          // 位置用 local-floor（绝对）
-          const posePos = frame.getJointPose(js, floorSpace);
-          // 朝向用 viewer（方向直觉）
-          const poseOri = frame.getJointPose(js, viewerSpace);
+          const pose = frame.getJointPose(js, viewerSpace);
+          if(!pose || pose.radius == null) continue;
 
-          if (!posePos || !poseOri || posePos.radius == null) continue;
+          const Pj = pose.transform.position;
+          const Qj = pose.transform.orientation;
 
-          // 位置基变换：XR -> (前/右/上)
-          const P1 = remapPositionToFwdRightUp(posePos.transform.position);
+          // 手系位置：先减去 wrist，再用 Qw⁻¹ 旋转回 wrist 框架
+          const dP = subVec(Pj, Pw);
+          const p_rel = rotateVecByQuat(Qw_inv, dP);
 
-          // 朝向基变换：q' = r ⊗ q_viewer ⊗ r^{-1}，并单位化（得到 xyzw）
-          const qV = poseOri.transform.orientation;
-          const qTmp = quatMul(rBasis, qV);
-          const q1 = quatNorm(quatMul(qTmp, rBasisInv)); // {x,y,z,w}
+          // 手系朝向：q_rel = Qw* ⊗ Qj
+          const q_rel = quatNorm(quatMul(Qw_inv, Qj));
 
-          joints[j] = {
-            x: P1.x, y: P1.y, z: P1.z,
-            qx: q1.x, qy: q1.y, qz: q1.z, qw: q1.w,
-            radius: posePos.radius
-          };
+          joints[j] = { x:p_rel.x, y:p_rel.y, z:p_rel.z,
+                        qx:q_rel.x, qy:q_rel.y, qz:q_rel.z, qw:q_rel.w,
+                        radius: pose.radius };
           validCount++;
         }
 
-        // 门控：关节充足才发送
+        // 3) 门控：只有“追踪中”才下发
         const ok = (validCount >= MIN_JOINTS) ? gateTrack(handed, true)
                                               : gateTrack(handed, false);
         if (!ok) continue;
 
-        // palm 用 wrist；若没有 wrist 则跳过
-        const wr = joints["wrist"];
-        if (!wr) continue;
+        // 4) 发包（标注 hand-local，方便后端识别语义）
+        handsPayload.push({ hand: handed, joints });
+      }
 
-        // palm.quat 按后端期望的 wxyz
-        const palm = {
-          origin: [wr.x, wr.y, wr.z],
-          quat:   [wr.qw, wr.qx, wr.qy, wr.qz]
-        };
-
-        // pinch：thumb-tip 到 index-finger-tip 的距离（米）
-        let pinch;
-        const tt = joints["thumb-tip"];
-        const it = joints["index-finger-tip"];
-        if (tt && it){
-          const dx = tt.x - it.x, dy = tt.y - it.y, dz = tt.z - it.z;
-          pinch = { thumb_index_dist: Math.hypot(dx, dy, dz) };
-        }
-
-        // 逐手发送“单手包”（与 Python 端一致）
-        const pkt = {
+      if (handsPayload.length > 0){
+        const out = {
           t: time,
-          space: 'local-floor(pos)+viewer(ori)',
-          hand: handed,
-          palm,
-          ...(pinch ? { pinch } : {})
-          // 如需调试再附加 joints：  , joints
+          space: 'hand-local(wrist)',  // 现在的坐标语义
+          hands: handsPayload
         };
-
         if (wsSend && wsSend.readyState === 1){
-          wsSend.send(JSON.stringify(pkt));
+          wsSend.send(JSON.stringify(out));
         }
       }
 
+
       session.requestAnimationFrame(onFrame);
-          });
+    });
   }
