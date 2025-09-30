@@ -97,10 +97,13 @@
         }
       }
 
-      // === 手部数据采集 + 发送（手坐标系：以 wrist 为原点与参考姿态） ===
+      // === 手部数据采集 + 发送（手坐标系：以 wrist 为原点/参考姿态 + 统一轴系） ===
       const handsPayload = [];
 
-      function subVec(a,b){ return {x:a.x-b.x, y:a.y-b.y, z:a.z-b.z}; }
+      // 固定基变换：viewer -> 你定义的全局轴（例如 +X前/+Y右/+Z上）
+      const qB = { x: 0.5, y: 0.5, z: -0.5, w: 0.5 }; // 和你前面 rBasis 一致
+      const qB_inv = { x: -qB.x, y: -qB.y, z: -qB.z, w: qB.w };
+
       function quatMul(a,b){
         return {
           x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
@@ -110,78 +113,86 @@
         };
       }
       function quatConj(q){ return {x:-q.x, y:-q.y, z:-q.z, w:q.w}; }
-      function quatNorm(q){
-        const n = Math.hypot(q.x,q.y,q.z,q.w) || 1;
-        return {x:q.x/n, y:q.y/n, z:q.z/n, w:q.w/n};
-      }
-      // 旋转向量：v' = q ⊗ v ⊗ q*
+      function quatNorm(q){ const n=Math.hypot(q.x,q.y,q.z,q.w)||1; return {x:q.x/n,y:q.y/n,z:q.z/n,w:q.w/n}; }
       function rotateVecByQuat(q, v){
         const qv = {x:v.x, y:v.y, z:v.z, w:0};
         const t  = quatMul(q, qv);
         const r  = quatMul(t, quatConj(q));
         return {x:r.x, y:r.y, z:r.z};
       }
+      function subVec(a,b){ return {x:a.x-b.x, y:a.y-b.y, z:a.z-b.z}; }
 
       for (const source of session.inputSources){
-        if(!source.hand) continue;
+        if (!source.hand) continue;
         const handed = source.handedness;   // 'left' | 'right'
 
-        // 1) wrist 作为手系基准
+        // 1) wrist 作为手系基准（在 viewerSpace 里取）
         const wristSpace = source.hand.get("wrist");
-        if (!wristSpace){ continue; }
+        if (!wristSpace) continue;
         const wristPose = frame.getJointPose(wristSpace, viewerSpace);
-        if (!wristPose || wristPose.radius == null){ continue; }
+        if (!wristPose /*|| wristPose.radius==null*/) continue;  // 不再依赖 radius
 
-        const Pw = wristPose.transform.position;        // viewer 中的 wrist 位置
-        const Qw = wristPose.transform.orientation;     // viewer 中的 wrist 朝向（单位四元数）
-        const Qw_inv = quatConj(Qw);                    // 单位四元数的逆 = 共轭
+        // 先把 wrist 从 viewer 轴旋到“统一轴”
+        const Pw_v = wristPose.transform.position;
+        const Qw_v = wristPose.transform.orientation;
+        const Pw   = rotateVecByQuat(qB, Pw_v);
+        const Qw   = quatNorm(quatMul(quatMul(qB, Qw_v), qB_inv));
+        const Qw_inv = quatConj(Qw);
 
+        // 2) 逐关节：统一轴 -> 再做手系相对量
         const joints = {};
         let validCount = 0;
 
-        // 2) 逐关节转到“手坐标系”
         for (const j of JOINTS){
           const js = source.hand.get(j);
-          if(!js) continue;
-
+          if (!js) continue;
           const pose = frame.getJointPose(js, viewerSpace);
-          if(!pose || pose.radius == null) continue;
+          if (!pose /*|| pose.radius==null*/) continue;
 
-          const Pj = pose.transform.position;
-          const Qj = pose.transform.orientation;
+          // 统一轴
+          const Pj = rotateVecByQuat(qB, pose.transform.position);
+          const Qj = quatNorm(quatMul(quatMul(qB, pose.transform.orientation), qB_inv));
 
-          // 手系位置：先减去 wrist，再用 Qw⁻¹ 旋转回 wrist 框架
+          // 手系：相对 wrist 的位置/姿态
           const dP = subVec(Pj, Pw);
           const p_rel = rotateVecByQuat(Qw_inv, dP);
-
-          // 手系朝向：q_rel = Qw* ⊗ Qj
           const q_rel = quatNorm(quatMul(Qw_inv, Qj));
 
-          joints[j] = { x:p_rel.x, y:p_rel.y, z:p_rel.z,
-                        qx:q_rel.x, qy:q_rel.y, qz:q_rel.z, qw:q_rel.w,
-                        radius: pose.radius };
+          joints[j] = {
+            x: p_rel.x, y: p_rel.y, z: p_rel.z,
+            qx: q_rel.x, qy: q_rel.y, qz: q_rel.z, qw: q_rel.w
+            // 可保留 radius: pose.radius 但别依赖它做过滤
+          };
           validCount++;
         }
 
-        // 3) 门控：只有“追踪中”才下发
-        const ok = (validCount >= MIN_JOINTS) ? gateTrack(handed, true)
-                                              : gateTrack(handed, false);
+        // 3) 门控：放宽一些，避免整帧被抛（或直接用你的 gateTrack）
+        const ok = (validCount >= Math.max(MIN_JOINTS ?? 12, 12))
+                  ? gateTrack(handed, true)
+                  : gateTrack(handed, false);
         if (!ok) continue;
 
-        // 4) 发包（标注 hand-local，方便后端识别语义）
-        handsPayload.push({ hand: handed, joints });
+        // 4) 同时发出“palm/wrist”的全局姿态（统一轴，便于下游做绝对→相对映射）
+        //    注意：很多后端喜欢 wxyz 或 xyzw，这里用 wxyz 清楚注明
+        const palm = {
+          origin: [Pw.x, Pw.y, Pw.z],
+          quat:   [Qw.w, Qw.x, Qw.y, Qw.z]  // wxyz
+        };
+
+        handsPayload.push({ hand: handed, palm, joints });
       }
 
       if (handsPayload.length > 0){
         const out = {
           t: time,
-          space: 'hand-local(wrist)',  // 现在的坐标语义
+          space: 'hand-local(wrist)+world-basis', // 结果既是手系相对量，又统一了轴系
           hands: handsPayload
         };
         if (wsSend && wsSend.readyState === 1){
           wsSend.send(JSON.stringify(out));
         }
       }
+
 
 
       session.requestAnimationFrame(onFrame);
